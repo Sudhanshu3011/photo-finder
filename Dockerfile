@@ -10,7 +10,7 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libgl1 libglib2.0-0 libgomp1 git \
         build-essential cmake g++ \
-        wget ca-certificates \
+        wget curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Step 1: Build tools (MUST be before insightface) ─────────────
