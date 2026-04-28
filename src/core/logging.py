@@ -1,10 +1,26 @@
 import asyncio
 import json
-
 from src.core.config import SUPABASE_URL, SUPABASE_SERVICE_KEY
+from loguru import logger as _loguru
+
+
+
 
 _http_session = None
 
+#Removing the Default Loging Template
+_loguru.remove()
+#Adding the Custom Loging Template
+_loguru.add(
+    lambda msg: print(msg, end=""),
+    format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}",
+    level="DEBUG",
+    colorize=True,
+)
+
+_log_fn = _loguru.log
+
+# A coroutine to initialize the HTTP session
 async def init_logging_session():
     global _http_session
     if SUPABASE_URL and SUPABASE_SERVICE_KEY:
@@ -17,29 +33,13 @@ async def init_logging_session():
                 "Prefer":        "return=minimal",
             }
         )
-
+# Coroutine to close the HTTP session
 async def close_logging_session():
     global _http_session
     if _http_session:
         await _http_session.close()
 
-try:
-    from loguru import logger as _loguru
-    _loguru.remove()
-    _loguru.add(
-        lambda msg: print(msg, end=""),
-        format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}",
-        level="DEBUG",
-        colorize=True,
-    )
-    _log_fn = _loguru.log
-except ImportError:
-    import logging as _logging
-    _logging.basicConfig(level=_logging.INFO)
-    _stdlib = _logging.getLogger("vsl")
 
-    def _log_fn(level: str, msg: str): 
-        _stdlib.log(getattr(_logging, level, 20), msg)
 
 async def _supabase_log(level: str, event: str, data: dict) -> None:
     if not _http_session:
@@ -67,6 +67,8 @@ async def _supabase_log(level: str, event: str, data: dict) -> None:
                 _log_fn("WARNING", f"Supabase log failed {r.status}: {body[:200]}")
     except Exception as exc:
         _log_fn("DEBUG", f"Supabase log push skipped: {exc}")
+
+
 
 def log(level: str, event: str, **data) -> None:
     _log_fn(level.upper(), f"[{event}] {json.dumps(data, default=str)}")
