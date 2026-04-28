@@ -4,8 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 """This Files have Imported and created Global Variables which are used 
-    Throughout the Project , There are in Total of 56 Variables 
-    """
+    Throughout the Project , There are in Total of 56 Variables which"""
 
 
 # ===============================================================
@@ -74,7 +73,7 @@ FACE_BLUR_THRESHOLD = float(os.getenv("FACE_BLUR_THRESHOLD", "50.0"))
 # ──────────────────────────────────────────────────────────────
 FACE_DIM = 512
 ADAFACE_DIM = 512
-
+FUSED_FACE_DIM = 1024
 
 FACE_CROP_THUMB_SIZE = int(os.getenv("FACE_CROP_THUMB_SIZE", "112"))
 FACE_CROP_QUALITY = int(os.getenv("FACE_CROP_QUALITY", "85"))
