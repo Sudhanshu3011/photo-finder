@@ -1,0 +1,147 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# ──────────────────────────────────────────────────────────────
+# Credentials & core
+# ──────────────────────────────────────────────────────────────
+DEFAULT_PINECONE_KEY = os.getenv("DEFAULT_PINECONE_KEY", "")
+DEFAULT_CLOUDINARY_URL = os.getenv("DEFAULT_CLOUDINARY_URL", "")
+
+# Legacy index (kept for read-only backward compat during Phase 2 rollout)
+IDX_FACES = os.getenv("IDX_FACES", "enterprise-faces")
+IDX_OBJECTS = os.getenv("IDX_OBJECTS", "enterprise-objects")
+
+# Phase 2: split face indexes (512-d each)
+IDX_FACES_ARCFACE = os.getenv("IDX_FACES_ARCFACE", "faces-arcface")
+IDX_FACES_ADAFACE = os.getenv("IDX_FACES_ADAFACE", "faces-adaface")
+
+# ──────────────────────────────────────────────────────────────
+# Concurrency / limits
+# ──────────────────────────────────────────────────────────────
+MAX_CONCURRENT_INFERENCES = int(os.getenv("MAX_CONCURRENT_INFERENCES", "2"))
+MAX_FILES_PER_UPLOAD = int(os.getenv("MAX_FILES_PER_UPLOAD", "50"))
+INFERENCE_CACHE_SIZE = int(os.getenv("INFERENCE_CACHE_SIZE", "128"))
+
+# ──────────────────────────────────────────────────────────────
+# Logging
+# ──────────────────────────────────────────────────────────────
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+
+# ──────────────────────────────────────────────────────────────
+# Image / detection
+# ──────────────────────────────────────────────────────────────
+MAX_IMAGE_SIZE = int(os.getenv("MAX_IMAGE_SIZE", "1024"))
+MAX_CROPS = int(os.getenv("MAX_CROPS", "10"))
+YOLO_PERSON_CLASS_ID = 0
+YOLO_MIN_CROP_PX = int(os.getenv("YOLO_MIN_CROP_PX", "50"))
+YOLO_CONF_THRESHOLD = float(os.getenv("YOLO_CONF_THRESHOLD", "0.25"))
+
+DET_SIZE_PRIMARY = (640, 640)
+DET_SCALES = [(1280, 1280), (960, 960), (640, 640)]
+IOU_DEDUP_THRESHOLD = float(os.getenv("IOU_DEDUP_THRESHOLD", "0.4"))
+MIN_FACE_SIZE = int(os.getenv("MIN_FACE_SIZE", "30"))
+MAX_FACES_PER_IMAGE = int(os.getenv("MAX_FACES_PER_IMAGE", "20"))
+
+# Phase 2: relaxed from 0.5 → 0.3 to index more faces (filter at query time)
+FACE_QUALITY_GATE = float(os.getenv("FACE_QUALITY_GATE", "0.3"))
+
+# Laplacian variance blur threshold for face crops.
+# Faces below this score are excluded from search results.
+# Typical values: >100 = sharp, 50-100 = acceptable, <50 = blurry.
+FACE_BLUR_THRESHOLD = float(os.getenv("FACE_BLUR_THRESHOLD", "50.0"))
+
+# ──────────────────────────────────────────────────────────────
+# Embedding dimensions
+# ──────────────────────────────────────────────────────────────
+FACE_DIM = 512
+ADAFACE_DIM = 512
+FUSED_FACE_DIM = 1024  # old concatenated — kept for legacy index reads
+
+FACE_CROP_THUMB_SIZE = int(os.getenv("FACE_CROP_THUMB_SIZE", "112"))
+FACE_CROP_QUALITY = int(os.getenv("FACE_CROP_QUALITY", "85"))
+FACE_CROP_PADDING = float(os.getenv("FACE_CROP_PADDING", "0.2"))
+ADAFACE_CROP_PADDING = float(os.getenv("ADAFACE_CROP_PADDING", "0.1"))
+
+ENABLE_ADAFACE = int(os.getenv("ENABLE_ADAFACE", "1"))
+HF_TOKEN = os.getenv("HF_TOKEN", "")
+
+# ──────────────────────────────────────────────────────────────
+# Phase 1: Speed flags (unchanged, leaving on)
+# ──────────────────────────────────────────────────────────────
+USE_ONNX_VISION = int(os.getenv("USE_ONNX_VISION", "0"))
+ONNX_MODELS_DIR = os.getenv("ONNX_MODELS_DIR", "onnx_models")
+ONNX_USE_INT8 = int(os.getenv("ONNX_USE_INT8", "1"))
+ENABLE_MULTI_SCALE_FALLBACK = int(os.getenv("ENABLE_MULTI_SCALE_FALLBACK", "1"))
+ENABLE_HORIZONTAL_FLIP = int(os.getenv("ENABLE_HORIZONTAL_FLIP", "0"))
+OMP_NUM_THREADS = int(os.getenv("OMP_NUM_THREADS", "2"))
+MKL_NUM_THREADS = int(os.getenv("MKL_NUM_THREADS", "2"))
+
+# ──────────────────────────────────────────────────────────────
+# Phase 2: Recall flags — DEFAULT ON
+# ──────────────────────────────────────────────────────────────
+
+# Split-index mode: write ArcFace + AdaFace to separate indexes, score-fuse at query
+USE_SPLIT_FACE_INDEXES = int(os.getenv("USE_SPLIT_FACE_INDEXES", "1"))
+
+# Score fusion weights. ArcFace is more discriminative for generic faces;
+# AdaFace helps with low-quality/extreme-angle cases. 0.6/0.4 is NIST-FRVT standard.
+ARCFACE_WEIGHT = float(os.getenv("ARCFACE_WEIGHT", "0.6"))
+ADAFACE_WEIGHT = float(os.getenv("ADAFACE_WEIGHT", "0.4"))
+
+# ArcFace-R100 same-person mean ~0.55, std ~0.12.
+# 0.30 is a balanced arc floor: catches side-profile/distance shots while
+# staying above the impostor tail (different-person mean ~0.05, std ~0.08).
+FACE_MATCH_THRESHOLD = float(os.getenv("FACE_MATCH_THRESHOLD", "0.30"))
+
+# With both models agreeing, 0.33 fused ≈ arc 0.30 + ada 0.38 together.
+# Slightly raised above the arc floor because fusion adds confidence.
+FUSED_MATCH_THRESHOLD = float(os.getenv("FUSED_MATCH_THRESHOLD", "0.33"))
+
+# ArcFace-only floor (no AdaFace confirmation available).
+# Stricter than FACE_MATCH_THRESHOLD since there is no second model to cross-check.
+ARCFACE_SOLO_THRESHOLD = float(os.getenv("ARCFACE_SOLO_THRESHOLD", "0.38"))
+
+# Query-time augmentation: OFF by default, enabled via deep_search form flag
+ENABLE_QUERY_TIME_AUG = int(os.getenv("ENABLE_QUERY_TIME_AUG", "0"))
+
+# Larger top_k: was 50, now 500 so large galleries aren't truncated
+FACE_SEARCH_TOP_K = int(os.getenv("FACE_SEARCH_TOP_K", "500"))
+OBJECT_SEARCH_TOP_K = int(os.getenv("OBJECT_SEARCH_TOP_K", "100"))
+
+# Final API returns at most this many per-face matches (after dedup)
+FACE_RESULTS_PER_QUERY_CAP = int(os.getenv("FACE_RESULTS_PER_QUERY_CAP", "200"))
+
+# ──────────────────────────────────────────────────────────────
+# Phase 3: People View + Job Queue — DEFAULT OFF (opt-in via env)
+# ──────────────────────────────────────────────────────────────
+
+# Redis-backed inference cache + job queue (requires Upstash)
+# Set UPSTASH_REDIS_URL + UPSTASH_REDIS_TOKEN in HF Space secrets.
+UPSTASH_REDIS_URL = os.getenv("UPSTASH_REDIS_URL", "")
+UPSTASH_REDIS_TOKEN = os.getenv("UPSTASH_REDIS_TOKEN", "")
+
+# Master toggle: enable the persistent Redis cache (replaces in-memory dict).
+# Falls back to in-memory if UPSTASH_REDIS_URL is not set, so this is safe to
+# leave True even before Upstash is wired up.
+USE_REDIS_CACHE = int(os.getenv("USE_REDIS_CACHE", "0"))
+
+# Async upload mode: when True, POST /api/upload?async=true returns a job_id
+# immediately and processes in the background worker.
+# Synchronous uploads (no ?async param) always work regardless of this flag.
+USE_ASYNC_UPLOADS = int(os.getenv("USE_ASYNC_UPLOADS", "1"))
+
+# Cluster-aware search expansion: after the initial face search, expand results
+# to include ALL images in the matched identity clusters.
+# Near-100% recall for well-indexed people. Disable if Supabase is slow.
+USE_CLUSTER_AWARE_SEARCH = int(os.getenv("USE_CLUSTER_AWARE_SEARCH", "1"))
+
+# HDBSCAN parameters — tuned for typical 1k–10k image libraries
+CLUSTER_MIN_SAMPLES = int(os.getenv("CLUSTER_MIN_SAMPLES", "3"))
+CLUSTER_MIN_CLUSTER_SIZE = int(os.getenv("CLUSTER_MIN_CLUSTER_SIZE", "3"))
+CLUSTER_EPSILON = float(os.getenv("CLUSTER_EPSILON", "0.35"))
+
+# Auto re-cluster after every N new face uploads (0 = disabled, manual only)
+CLUSTER_AUTO_TRIGGER_EVERY = int(os.getenv("CLUSTER_AUTO_TRIGGER_EVERY", "0"))

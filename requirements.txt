@@ -1,0 +1,61 @@
+# requirements.txt — Enterprise Lens V5 (Phase 3)
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# ── Web framework ────────────────────────────────────────────────
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.20
+
+# ── PyTorch CPU-only ─────────────────────────────────────────────
+torch==2.3.1+cpu
+torchvision==0.18.1+cpu
+scikit-learn
+
+# ── HuggingFace stack ─────────────────────────────────────────────
+# Pin transformers to 4.x — AdaFace CVLFaceRecognitionModel (trust_remote_code)
+# uses _tied_weights_keys (old API). transformers 5.0+ renamed it to
+# all_tied_weights_keys → crash on load.
+transformers>=4.40.0,<5.0.0
+huggingface_hub>=0.26.0
+safetensors>=0.4.0
+tokenizers>=0.20.0
+sentencepiece
+accelerate>=1.1.0
+omegaconf
+
+# ── InsightFace — SCRFD + ArcFace-R100 ───────────────────────────
+insightface==0.7.3
+onnxruntime>=1.20.0
+huggingface-hub>=0.22.0
+
+# ── YOLO — object segmentation ───────────────────────────────────
+ultralytics==8.3.27
+
+# ── Computer vision ───────────────────────────────────────────────
+opencv-python-headless==4.10.0.84
+Pillow==11.0.0
+# Phase 3: pin numpy <2.0 — hdbscan 0.8.33 requires numpy <2.0
+numpy>=1.26.4,<2.0
+
+# ── Vector DB + CDN ──────────────────────────────────────────────
+pinecone==5.4.1
+cloudinary==1.41.0
+
+# ── Async HTTP ───────────────────────────────────────────────────
+aiohttp==3.11.9
+
+# ── Phase 3: Clustering + job queue ──────────────────────────────
+# hdbscan: HDBSCAN clustering for People View (face identity albums)
+hdbscan>=0.8.33
+# redis: Upstash Redis REST client uses aiohttp (already present).
+# No redis-py socket library needed — Upstash exposes a pure HTTP API.
+# redis package only needed if you switch to raw TCP Upstash endpoint.
+# redis>=5.0.0  ← uncomment only if switching to non-REST Upstash
+
+# ── Utilities ────────────────────────────────────────────────────
+loguru==0.7.2
+inflect==7.4.0
+python-dotenv==1.0.1
+
+fvcore

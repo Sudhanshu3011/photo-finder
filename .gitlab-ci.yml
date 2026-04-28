@@ -1,0 +1,14 @@
+stages:
+  - ping
+
+keep_hf_space_warm:
+  stage: ping
+  script:
+    - echo "Ping health endpoint"
+    - curl -sf --max-time 90 https://adarshdrc-visual-search-api.hf.space/api/health || echo "Ping failed (may be cold-starting)"
+    
+    - echo "Waiting for warmup..."
+    - sleep 60
+    
+    - echo "Second warmup ping"
+    - curl -sf --max-time 30 https://adarshdrc-visual-search-api.hf.space/api/health
