@@ -264,3 +264,165 @@ async def _run_object_search(object_vectors, idx_obj, start, user_id, ip, mode) 
         lanes=["object"], results=len(final), duration_ms=duration_ms)
 
     return {"mode": "object", "results": final, "face_groups": []}
+
+
+@router.post("/api/search-by-face")
+async def search_by_face(
+    request: Request,
+    front: UploadFile = File(...),
+    left: UploadFile = File(None),
+    right: UploadFile = File(None),
+    user_id: str = Form(""),
+    keys: dict = Depends(get_verified_keys),
+):
+    """
+    Multi-angle face search: accepts 1-3 face images, fuses embeddings server-side,
+    performs single Pinecone query. 3x faster + lower quota usage vs 3 sequential queries.
+    """
+    import numpy as np
+
+    ip = get_ip(request)
+    start = time.perf_counter()
+    mode = "guest" if is_default_key(keys["pinecone_key"], DEFAULT_PINECONE_KEY) else "personal"
+
+    log("INFO", "search.search_by_face.start",
+        user_id=user_id or "anonymous", ip=ip, mode=mode)
+
+    try:
+        ai_manager = request.app.state.ai
+        sem = request.app.state.ai_semaphore
+
+        # Read all image bytes in parallel
+        images = {}
+        for name, file in [("front", front), ("left", left), ("right", right)]:
+            if file:
+                images[name] = await file.read()
+
+        if not images:
+            raise HTTPException(400, "At least front image required")
+
+        # Process all images in parallel
+        async def process_img(name, data):
+            async with sem:
+                return name, await ai_manager.process_image_bytes_async(
+                    data, detect_faces=True
+                )
+
+        results = await asyncio.gather(
+            *[process_img(name, data) for name, data in images.items()],
+            return_exceptions=True
+        )
+
+        # Extract face vectors from successful results
+        face_vectors_by_angle = {}
+        for result in results:
+            if isinstance(result, Exception):
+                log("WARN", "search.search_by_face.process_error",
+                    user_id=user_id or "anonymous", ip=ip, error=str(result))
+                continue
+
+            name, vectors = result
+            face_vecs = [v for v in vectors if v["type"] == "face"]
+            if face_vecs:
+                face_vectors_by_angle[name] = face_vecs[0]
+
+        if not face_vectors_by_angle:
+            raise HTTPException(400, "No face detected in provided images")
+
+        # Fuse embeddings: front weighted higher
+        weights = {"front": 0.5, "left": 0.25, "right": 0.25}
+        arcface_vectors = []
+        adaface_vectors = []
+        det_scores = []
+
+        for angle, vec in face_vectors_by_angle.items():
+            w = weights.get(angle, 0)
+            if w > 0:
+                arcface_vectors.append(np.array(to_list(vec["arcface_vector"])) * w)
+                det_scores.append(vec.get("det_score", 1.0))
+
+                if vec.get("has_adaface") and vec.get("adaface_vector"):
+                    adaface_vectors.append(np.array(to_list(vec["adaface_vector"])) * w)
+
+        if not arcface_vectors:
+            raise HTTPException(400, "Could not fuse face embeddings")
+
+        # Fuse and normalize
+        fused_arcface = np.sum(arcface_vectors, axis=0)
+        fused_arcface = fused_arcface / (np.linalg.norm(fused_arcface) + 1e-7)
+
+        fused_adaface = None
+        has_adaface = False
+        if adaface_vectors and len(adaface_vectors) > 0:
+            fused_adaface = np.sum(adaface_vectors, axis=0)
+            fused_adaface = fused_adaface / (np.linalg.norm(fused_adaface) + 1e-7)
+            has_adaface = True
+
+        # Build synthetic face vector dict for query
+        fv = {
+            "face_idx": 0,
+            "det_score": float(np.mean(det_scores)),
+            "arcface_vector": fused_arcface.tolist(),
+            "has_adaface": has_adaface,
+            "adaface_vector": fused_adaface.tolist() if has_adaface else None,
+            "bbox": [0, 0, 0, 0],
+            "face_width_px": 0,
+            "face_crop": "",
+        }
+
+        inference_ms = round((time.perf_counter() - start) * 1000)
+        log("INFO", "search.search_by_face.fused",
+            user_id=user_id or "anonymous", ip=ip,
+            angles=list(face_vectors_by_angle.keys()),
+            inference_ms=inference_ms)
+
+        pc = pinecone_pool.get(keys["pinecone_key"])
+        cluster_uid = hashlib.sha256(keys["pinecone_key"].encode()).hexdigest()[:16]
+
+        # Ensure indexes exist
+        try:
+            created = await asyncio.to_thread(ensure_indexes, pc)
+            if created:
+                log("INFO", "search.indexes_auto_created",
+                    user_id=user_id or "anonymous", ip=ip, created=created)
+                await asyncio.sleep(8)
+        except Exception as e:
+            log("ERROR", "search.ensure_indexes_failed",
+                user_id=user_id or "anonymous", ip=ip, error=str(e))
+
+        # Setup indexes
+        if USE_SPLIT_FACE_INDEXES:
+            idx_arcface = pc.Index(IDX_FACES_ARCFACE)
+            idx_adaface = pc.Index(IDX_FACES_ADAFACE)
+            idx_face_legacy = None
+        else:
+            idx_face_legacy = pc.Index(IDX_FACES)
+            idx_arcface = None
+            idx_adaface = None
+
+        # Query with fused vector
+        if USE_SPLIT_FACE_INDEXES:
+            face_group = await _query_face_split(fv, idx_arcface, idx_adaface, pc=pc, cluster_uid=cluster_uid)
+        else:
+            face_group = await _query_face_legacy(fv, idx_face_legacy)
+
+        duration_ms = round((time.perf_counter() - start) * 1000)
+        log("INFO", "search.search_by_face.complete",
+            user_id=user_id or "anonymous", ip=ip,
+            results=len(face_group.get("matches", [])),
+            duration_ms=duration_ms)
+
+        return {
+            "mode": "face",
+            "face_groups": [face_group] if face_group.get("matches") else [],
+            "results": [],
+            "object_results": [],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log("ERROR", "search.search_by_face.error",
+            user_id=user_id or "anonymous", ip=ip, mode=mode,
+            error=str(e), traceback=traceback.format_exc()[-800:])
+        raise HTTPException(500, str(e))
