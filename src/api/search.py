@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import time
 import traceback
+from typing import Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile, Depends
 
@@ -270,8 +271,8 @@ async def _run_object_search(object_vectors, idx_obj, start, user_id, ip, mode) 
 async def search_by_face(
     request: Request,
     front: UploadFile = File(...),
-    left: UploadFile = File(None),
-    right: UploadFile = File(None),
+    left: Optional[UploadFile] = File(None),
+    right: Optional[UploadFile] = File(None),
     user_id: str = Form(""),
     keys: dict = Depends(get_verified_keys),
 ):
@@ -292,13 +293,23 @@ async def search_by_face(
         ai_manager = request.app.state.ai
         sem = request.app.state.ai_semaphore
 
+        log("DEBUG", "search.search_by_face.received_files",
+            user_id=user_id or "anonymous", ip=ip,
+            front=bool(front), left=bool(left), right=bool(right))
+
         # Read all image bytes in parallel
         images = {}
         for name, file in [("front", front), ("left", left), ("right", right)]:
             if file:
-                images[name] = await file.read()
+                file_bytes = await file.read()
+                images[name] = file_bytes
+                log("DEBUG", "search.search_by_face.file_read",
+                    user_id=user_id or "anonymous", ip=ip,
+                    angle=name, size_bytes=len(file_bytes))
 
         if not images:
+            log("ERROR", "search.search_by_face.no_images",
+                user_id=user_id or "anonymous", ip=ip)
             raise HTTPException(400, "At least front image required")
 
         # Process all images in parallel
@@ -318,15 +329,25 @@ async def search_by_face(
         for result in results:
             if isinstance(result, Exception):
                 log("WARN", "search.search_by_face.process_error",
-                    user_id=user_id or "anonymous", ip=ip, error=str(result))
+                    user_id=user_id or "anonymous", ip=ip,
+                    error=str(result), traceback=traceback.format_exc()[-500:])
                 continue
 
             name, vectors = result
             face_vecs = [v for v in vectors if v["type"] == "face"]
             if face_vecs:
                 face_vectors_by_angle[name] = face_vecs[0]
+                log("DEBUG", "search.search_by_face.face_detected",
+                    user_id=user_id or "anonymous", ip=ip,
+                    angle=name, det_score=face_vecs[0].get("det_score", 0))
+            else:
+                log("WARN", "search.search_by_face.no_face_in_angle",
+                    user_id=user_id or "anonymous", ip=ip,
+                    angle=name, vectors_count=len(vectors) if vectors else 0)
 
         if not face_vectors_by_angle:
+            log("ERROR", "search.search_by_face.no_faces_detected",
+                user_id=user_id or "anonymous", ip=ip)
             raise HTTPException(400, "No face detected in provided images")
 
         # Fuse embeddings: front weighted higher
