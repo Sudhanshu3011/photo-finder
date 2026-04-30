@@ -362,7 +362,7 @@ async def search_by_face(
                 arcface_vectors.append(np.array(to_list(vec["arcface_vector"])) * w)
                 det_scores.append(vec.get("det_score", 1.0))
 
-                if vec.get("has_adaface") and vec.get("adaface_vector"):
+                if vec.get("has_adaface") and vec.get("adaface_vector") is not None:
                     adaface_vectors.append(np.array(to_list(vec["adaface_vector"])) * w)
 
         if not arcface_vectors:
