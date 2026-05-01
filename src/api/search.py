@@ -350,6 +350,12 @@ async def search_by_face(
                 user_id=user_id or "anonymous", ip=ip)
             raise HTTPException(400, "No face detected in provided images")
 
+        # Get front face crop for results display (use if available, fallback to any angle)
+        front_face_crop = (
+            face_vectors_by_angle.get("front", {}).get("face_crop", "") or
+            next((v.get("face_crop", "") for v in face_vectors_by_angle.values() if v.get("face_crop")), "")
+        )
+
         # Fuse embeddings: front weighted higher
         weights = {"front": 0.5, "left": 0.25, "right": 0.25}
         arcface_vectors = []
@@ -379,7 +385,7 @@ async def search_by_face(
             fused_adaface = fused_adaface / (np.linalg.norm(fused_adaface) + 1e-7)
             has_adaface = True
 
-        # Build synthetic face vector dict for query
+        # Build synthetic face vector dict for query (include front face crop for UI display)
         fv = {
             "face_idx": 0,
             "det_score": float(np.mean(det_scores)),
@@ -388,7 +394,7 @@ async def search_by_face(
             "adaface_vector": fused_adaface.tolist() if has_adaface else None,
             "bbox": [0, 0, 0, 0],
             "face_width_px": 0,
-            "face_crop": "",
+            "face_crop": front_face_crop,
         }
 
         inference_ms = round((time.perf_counter() - start) * 1000)
