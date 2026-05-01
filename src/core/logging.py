@@ -70,11 +70,15 @@ async def _supabase_log(level: str, event: str, data: dict) -> None:
 
 
 
+_LEVEL_ALIASES = {"WARN": "WARNING", "ERR": "ERROR", "FATAL": "CRITICAL"}
+
+
 def log(level: str, event: str, **data) -> None:
-    _log_fn(level.upper(), f"[{event}] {json.dumps(data, default=str)}")
+    norm_level = _LEVEL_ALIASES.get(level.upper(), level.upper())
+    _log_fn(norm_level, f"[{event}] {json.dumps(data, default=str)}")
     try:
         loop = asyncio.get_running_loop()
-        loop.create_task(_supabase_log(level, event, data))
+        loop.create_task(_supabase_log(norm_level, event, data))
     except RuntimeError:
         pass
 

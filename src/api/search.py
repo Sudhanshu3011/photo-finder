@@ -328,7 +328,7 @@ async def search_by_face(
         face_vectors_by_angle = {}
         for result in results:
             if isinstance(result, Exception):
-                log("WARN", "search.search_by_face.process_error",
+                log("WARNING", "search.search_by_face.process_error",
                     user_id=user_id or "anonymous", ip=ip,
                     error=str(result), traceback=traceback.format_exc()[-500:])
                 continue
@@ -341,7 +341,7 @@ async def search_by_face(
                     user_id=user_id or "anonymous", ip=ip,
                     angle=name, det_score=face_vecs[0].get("det_score", 0))
             else:
-                log("WARN", "search.search_by_face.no_face_in_angle",
+                log("WARNING", "search.search_by_face.no_face_in_angle",
                     user_id=user_id or "anonymous", ip=ip,
                     angle=name, vectors_count=len(vectors) if vectors else 0)
 
