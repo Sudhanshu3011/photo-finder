@@ -161,13 +161,22 @@ def _run_hdbscan(vectors: np.ndarray) -> np.ndarray:
 
 def _pick_representative(cluster_vecs: np.ndarray, cluster_meta: list[dict]) -> dict:
     """
-    Picks the face closest to the cluster centroid as the representative.
-    Returns the metadata dict for that face.
+    Picks the non-blurry face closest to the cluster centroid as the representative.
+    Prefers sharpest (highest blur_score) faces. Returns the metadata dict for that face.
     """
     centroid = cluster_vecs.mean(axis=0)
     centroid /= np.linalg.norm(centroid) + 1e-8
     sims = cluster_vecs @ centroid
-    best_idx = int(np.argmax(sims))
+
+    # Sort by similarity, but prefer non-blurry faces (higher blur_score)
+    sorted_indices = np.argsort(sims)[::-1]  # highest similarity first
+    for idx in sorted_indices:
+        blur_score = cluster_meta[idx].get("blur_score", 100.0)
+        if blur_score >= CLUSTERING_BLUR_THRESHOLD:
+            return cluster_meta[int(idx)]
+
+    # Fallback: if all faces are blurry, pick the sharpest one
+    best_idx = max(range(len(cluster_meta)), key=lambda i: cluster_meta[i].get("blur_score", 0))
     return cluster_meta[best_idx]
 
 

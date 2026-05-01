@@ -156,9 +156,9 @@ USE_ASYNC_UPLOADS = int(os.getenv("USE_ASYNC_UPLOADS", "1"))
 USE_CLUSTER_AWARE_SEARCH = int(os.getenv("USE_CLUSTER_AWARE_SEARCH", "1"))
 
 # HDBSCAN parameters — tuned for typical 1k–10k image libraries
-CLUSTER_MIN_SAMPLES = int(os.getenv("CLUSTER_MIN_SAMPLES", "2"))  # Lowered from 3 to include pairs
-CLUSTER_MIN_CLUSTER_SIZE = int(os.getenv("CLUSTER_MIN_CLUSTER_SIZE", "2"))  # Lowered from 3 to 2
-CLUSTER_EPSILON = float(os.getenv("CLUSTER_EPSILON", "0.35"))
+CLUSTER_MIN_SAMPLES = int(os.getenv("CLUSTER_MIN_SAMPLES", "5"))  # Increased to 5 for stricter clustering, fewer duplicates
+CLUSTER_MIN_CLUSTER_SIZE = int(os.getenv("CLUSTER_MIN_CLUSTER_SIZE", "5"))  # Increased from 2 to 5, require 5+ faces per cluster
+CLUSTER_EPSILON = float(os.getenv("CLUSTER_EPSILON", "0.20"))  # Tightened from 0.35 to 0.20 to reduce duplicate clusters
 
 # Auto re-cluster after every N new face uploads (0 = disabled, manual only)
 CLUSTER_AUTO_TRIGGER_EVERY = int(os.getenv("CLUSTER_AUTO_TRIGGER_EVERY", "0"))
