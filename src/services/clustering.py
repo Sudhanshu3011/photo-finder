@@ -35,7 +35,7 @@ from src.core.config import (
     IDX_FACES_ARCFACE,
     SUPABASE_URL, SUPABASE_SERVICE_KEY,
     CLUSTER_MIN_SAMPLES, CLUSTER_MIN_CLUSTER_SIZE, CLUSTER_EPSILON,
-    FACE_SEARCH_TOP_K,
+    FACE_SEARCH_TOP_K, CLUSTERING_BLUR_THRESHOLD,
 )
 
 
@@ -193,7 +193,17 @@ async def run_clustering(pc, user_id: str) -> dict:
 
     ids = [r["id"] for r in raw]
     metas = [r["metadata"] for r in raw]
-    matrix = np.array([r["values"] for r in raw], dtype=np.float32)
+
+    # Filter out blurry faces before clustering
+    valid_indices = [i for i, meta in enumerate(metas) if meta.get("blur_score", 100.0) >= CLUSTERING_BLUR_THRESHOLD]
+
+    if len(valid_indices) < CLUSTER_MIN_CLUSTER_SIZE:
+        return {"status": "skipped", "reason": f"only {len(valid_indices)} non-blurry vectors after blur filtering", "vectors": len(raw), "valid_vectors": len(valid_indices)}
+
+    ids = [ids[i] for i in valid_indices]
+    metas = [metas[i] for i in valid_indices]
+    raw_values = [r["values"] for r in raw]
+    matrix = np.array([raw_values[i] for i in valid_indices], dtype=np.float32)
 
     # L2-normalise before euclidean HDBSCAN (equivalent to angular distance)
     norms = np.linalg.norm(matrix, axis=1, keepdims=True)

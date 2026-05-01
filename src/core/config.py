@@ -64,9 +64,10 @@ MAX_FACES_PER_IMAGE = int(os.getenv("MAX_FACES_PER_IMAGE", "20"))
 FACE_QUALITY_GATE = float(os.getenv("FACE_QUALITY_GATE", "0.3"))
 
 # Laplacian variance blur threshold for face crops.
-# Faces below this score are excluded from search results.
+# Faces below this score are excluded from search results AND clustering.
 # Typical values: >100 = sharp, 50-100 = acceptable, <50 = blurry.
 FACE_BLUR_THRESHOLD = float(os.getenv("FACE_BLUR_THRESHOLD", "50.0"))
+CLUSTERING_BLUR_THRESHOLD = float(os.getenv("CLUSTERING_BLUR_THRESHOLD", "30.0"))  # Slightly more lenient for clustering
 
 # ──────────────────────────────────────────────────────────────
 # Embedding dimensions
@@ -155,8 +156,8 @@ USE_ASYNC_UPLOADS = int(os.getenv("USE_ASYNC_UPLOADS", "1"))
 USE_CLUSTER_AWARE_SEARCH = int(os.getenv("USE_CLUSTER_AWARE_SEARCH", "1"))
 
 # HDBSCAN parameters — tuned for typical 1k–10k image libraries
-CLUSTER_MIN_SAMPLES = int(os.getenv("CLUSTER_MIN_SAMPLES", "3"))
-CLUSTER_MIN_CLUSTER_SIZE = int(os.getenv("CLUSTER_MIN_CLUSTER_SIZE", "3"))
+CLUSTER_MIN_SAMPLES = int(os.getenv("CLUSTER_MIN_SAMPLES", "2"))  # Lowered from 3 to include pairs
+CLUSTER_MIN_CLUSTER_SIZE = int(os.getenv("CLUSTER_MIN_CLUSTER_SIZE", "2"))  # Lowered from 3 to 2
 CLUSTER_EPSILON = float(os.getenv("CLUSTER_EPSILON", "0.35"))
 
 # Auto re-cluster after every N new face uploads (0 = disabled, manual only)
