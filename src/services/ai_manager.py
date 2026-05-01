@@ -398,23 +398,38 @@ class AIModelManager:
         self, bgr_enhanced: np.ndarray, scale: tuple
     ) -> list:
         H, W = bgr_enhanced.shape[:2]
-        scale_w, scale_h = min(W, scale[0]), min(H, scale[1])
-        if scale_w == W and scale_h == H:
+        # Preserve aspect ratio: scale longest side to match scale's longest side.
+        # The previous code clamped each dim independently which squashed wide
+        # images (e.g. 4032x1816 → 640x640) and produced distorted face crops
+        # whose embeddings would not match the same person shot in a normal
+        # aspect ratio.
+        target_max = max(scale[0], scale[1])
+        long_side = max(W, H)
+        if long_side <= target_max:
             bgr_scaled = bgr_enhanced
+            scale_w, scale_h = W, H
         else:
+            ratio = target_max / long_side
+            scale_w = max(1, int(round(W * ratio)))
+            scale_h = max(1, int(round(H * ratio)))
             bgr_scaled = cv2.resize(bgr_enhanced, (scale_w, scale_h))
         try:
             with self._face_lock:
                 # input_size must be set inside the lock — setting it outside
                 # is a race condition when two inference threads run concurrently,
                 # causing the wrong scale to be used and faces to be missed.
-                self.face_app.det_model.input_size = scale
+                # Use the actual scaled dims so the detector's letterboxing
+                # math matches the image we're feeding it.
+                self.face_app.det_model.input_size = (scale_w, scale_h)
                 faces_at_scale = self.face_app.get(bgr_scaled)
             sx, sy = W / scale_w, H / scale_h
             for f in faces_at_scale:
                 if sx != 1.0 or sy != 1.0:
                     f.bbox[0] *= sx; f.bbox[1] *= sy
                     f.bbox[2] *= sx; f.bbox[3] *= sy
+                if hasattr(f, 'kps') and f.kps is not None:
+                    f.kps[:, 0] *= sx
+                    f.kps[:, 1] *= sy
             return faces_at_scale
         except Exception:
             return []
@@ -447,16 +462,15 @@ class AIModelManager:
 
             if ENABLE_HORIZONTAL_FLIP:
                 bgr_flip = cv2.flip(bgr_enhanced, 1)
-                try:
-                    with self._face_lock:
-                        self.face_app.det_model.input_size = DET_SIZE_PRIMARY
-                        faces_flip = self.face_app.get(bgr_flip)
-                    for f in faces_flip:
-                        x1, y1, x2, y2 = f.bbox
-                        f.bbox[0], f.bbox[2] = W - x2, W - x1
-                    all_raw_faces.extend(faces_flip)
-                except Exception:
-                    pass
+                # Reuse the aspect-ratio-preserving scaler so flipped detection
+                # also avoids the wide-image squash.
+                faces_flip = self._run_detection_at_scale(bgr_flip, DET_SIZE_PRIMARY)
+                for f in faces_flip:
+                    x1, y1, x2, y2 = f.bbox
+                    f.bbox[0], f.bbox[2] = W - x2, W - x1
+                    if hasattr(f, 'kps') and f.kps is not None:
+                        f.kps[:, 0] = W - f.kps[:, 0]
+                all_raw_faces.extend(faces_flip)
 
             self.face_app.det_model.input_size = DET_SIZE_PRIMARY
             faces = _dedup_faces(all_raw_faces)

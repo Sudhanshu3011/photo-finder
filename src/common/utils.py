@@ -73,6 +73,13 @@ def cld_thumb_url(url: str) -> str:
     return url.replace("/upload/", "/upload/c_limit,w_500/")
 
 
+def cld_face_thumb_url(url: str, width: int = 300) -> str:
+    """Generate optimized thumbnail URL for face images (smaller than general thumbs)."""
+    if not url:
+        return ""
+    return url.replace("/upload/", f"/upload/c_limit,w_{width},q_30,f_auto/")
+
+
 def face_ui_score(raw_score: float, mode: str = "fused") -> float:
     """
     Platt-scaled probability score for the UI.

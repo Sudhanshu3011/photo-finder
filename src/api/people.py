@@ -94,7 +94,7 @@ async def get_cluster_images(
     {
       "cluster_id": "uuid",
       "images": [
-        {"url": "...", "folder": "...", "face_crop": "<base64>"},
+        {"url": "...", "thumb_url": "...", "folder": "...", "face_crop": "<base64>"},
         ...
       ],
       "total": 12

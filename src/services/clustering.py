@@ -37,6 +37,7 @@ from src.core.config import (
     CLUSTER_MIN_SAMPLES, CLUSTER_MIN_CLUSTER_SIZE, CLUSTER_EPSILON,
     FACE_SEARCH_TOP_K, CLUSTERING_BLUR_THRESHOLD,
 )
+from src.common.utils import cld_face_thumb_url
 
 
 # ──────────────────────────────────────────────────────────────
@@ -309,6 +310,7 @@ async def get_person_images(cluster_id: str, user_id: str) -> list[dict]:
             seen.add(url)
             out.append({
                 "url": url,
+                "thumb_url": cld_face_thumb_url(url),
                 "folder": r.get("folder", ""),
                 "face_crop": r.get("face_crop", ""),
             })
