@@ -398,11 +398,16 @@ class AIModelManager:
         self, bgr_enhanced: np.ndarray, scale: tuple
     ) -> list:
         H, W = bgr_enhanced.shape[:2]
-        # Preserve aspect ratio: scale longest side to match scale's longest side.
-        # The previous code clamped each dim independently which squashed wide
-        # images (e.g. 4032x1816 → 640x640) and produced distorted face crops
-        # whose embeddings would not match the same person shot in a normal
-        # aspect ratio.
+        # Preserve aspect ratio when downscaling. The previous code clamped each
+        # dim independently which squashed wide images (e.g. 4032x1816 → 640x640)
+        # and produced distorted face crops whose embeddings would not match the
+        # same person shot in a normal aspect ratio.
+        #
+        # NOTE: We keep `input_size` set to the original square `scale`. InsightFace
+        # SCRFD internally letterboxes the image into the input_size canvas while
+        # preserving aspect ratio — so feeding a (640, 360) image with input_size
+        # (640, 640) results in a properly padded 640x640 detector input. The
+        # square input_size also matches the ONNX model's expected shape.
         target_max = max(scale[0], scale[1])
         long_side = max(W, H)
         if long_side <= target_max:
@@ -418,18 +423,16 @@ class AIModelManager:
                 # input_size must be set inside the lock — setting it outside
                 # is a race condition when two inference threads run concurrently,
                 # causing the wrong scale to be used and faces to be missed.
-                # Use the actual scaled dims so the detector's letterboxing
-                # math matches the image we're feeding it.
-                self.face_app.det_model.input_size = (scale_w, scale_h)
+                self.face_app.det_model.input_size = scale
                 faces_at_scale = self.face_app.get(bgr_scaled)
             sx, sy = W / scale_w, H / scale_h
             for f in faces_at_scale:
                 if sx != 1.0 or sy != 1.0:
                     f.bbox[0] *= sx; f.bbox[1] *= sy
                     f.bbox[2] *= sx; f.bbox[3] *= sy
-                if hasattr(f, 'kps') and f.kps is not None:
-                    f.kps[:, 0] *= sx
-                    f.kps[:, 1] *= sy
+                    if hasattr(f, 'kps') and f.kps is not None:
+                        f.kps[:, 0] *= sx
+                        f.kps[:, 1] *= sy
             return faces_at_scale
         except Exception:
             return []
