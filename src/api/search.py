@@ -128,10 +128,10 @@ async def _query_face_split(fv, idx_arcface, idx_adaface, pc=None, cluster_uid=N
             )
         raise
 
-    # Only expand clusters for high-confidence matches (fused_score >= 0.50).
-    # A borderline match at 0.40 could be a different person; cluster expansion
-    # would then pull in an entire wrong identity — exactly what we want to avoid.
-    CLUSTER_EXPAND_MIN_SCORE = 0.50
+    # Expand clusters for matches with fused_score >= 0.35 (more inclusive).
+    # Most same-person matches score above 0.35; this ensures complete photo galleries.
+    # Lowered from 0.50 to catch borderline cases while still rejecting imposters.
+    CLUSTER_EXPAND_MIN_SCORE = 0.35
     high_confidence = {
         url: d for url, d in image_map.items()
         if d.get("fused_score", 0.0) >= CLUSTER_EXPAND_MIN_SCORE

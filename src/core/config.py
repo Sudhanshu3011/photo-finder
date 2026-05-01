@@ -107,17 +107,18 @@ ARCFACE_WEIGHT = float(os.getenv("ARCFACE_WEIGHT", "0.6"))
 ADAFACE_WEIGHT = float(os.getenv("ADAFACE_WEIGHT", "0.4"))
 
 # ArcFace-R100 same-person mean ~0.55, std ~0.12.
-# 0.30 is a balanced arc floor: catches side-profile/distance shots while
-# staying above the impostor tail (different-person mean ~0.05, std ~0.08).
-FACE_MATCH_THRESHOLD = float(os.getenv("FACE_MATCH_THRESHOLD", "0.30"))
+# Lowered from 0.30 to 0.22 for better recall on same-person photos.
+# Still well above impostor tail (different-person mean ~0.05, std ~0.08).
+FACE_MATCH_THRESHOLD = float(os.getenv("FACE_MATCH_THRESHOLD", "0.22"))
 
-# With both models agreeing, 0.33 fused ≈ arc 0.30 + ada 0.38 together.
-# Slightly raised above the arc floor because fusion adds confidence.
-FUSED_MATCH_THRESHOLD = float(os.getenv("FUSED_MATCH_THRESHOLD", "0.33"))
+# With both models agreeing, 0.26 fused ≈ arc 0.22 + ada 0.30 together.
+# Lower threshold when both models agree = more complete galleries.
+FUSED_MATCH_THRESHOLD = float(os.getenv("FUSED_MATCH_THRESHOLD", "0.26"))
 
 # ArcFace-only floor (no AdaFace confirmation available).
-# Stricter than FACE_MATCH_THRESHOLD since there is no second model to cross-check.
-ARCFACE_SOLO_THRESHOLD = float(os.getenv("ARCFACE_SOLO_THRESHOLD", "0.38"))
+# Lowered from 0.38 to 0.28 — still strict enough to reject imposters while
+# capturing same-person photos across diverse angles/lighting.
+ARCFACE_SOLO_THRESHOLD = float(os.getenv("ARCFACE_SOLO_THRESHOLD", "0.28"))
 
 # Query-time augmentation: OFF by default, enabled via deep_search form flag
 ENABLE_QUERY_TIME_AUG = int(os.getenv("ENABLE_QUERY_TIME_AUG", "0"))
@@ -127,7 +128,8 @@ FACE_SEARCH_TOP_K = int(os.getenv("FACE_SEARCH_TOP_K", "500"))
 OBJECT_SEARCH_TOP_K = int(os.getenv("OBJECT_SEARCH_TOP_K", "100"))
 
 # Final API returns at most this many per-face matches (after dedup)
-FACE_RESULTS_PER_QUERY_CAP = int(os.getenv("FACE_RESULTS_PER_QUERY_CAP", "200"))
+# Increased from 200 to 500 to show complete photo galleries
+FACE_RESULTS_PER_QUERY_CAP = int(os.getenv("FACE_RESULTS_PER_QUERY_CAP", "500"))
 
 # ──────────────────────────────────────────────────────────────
 # Phase 3: People View + Job Queue — DEFAULT OFF (opt-in via env)

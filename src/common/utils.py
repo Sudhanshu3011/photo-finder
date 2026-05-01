@@ -86,8 +86,8 @@ def face_ui_score(raw_score: float, mode: str = "fused") -> float:
     The sigmoid maps raw cosine → probability of match for the UI.
     """
     if mode == "fused":
-        threshold = 0.30   # Balanced boundary for fused scores
-        k = 20.0           # Steep drop-off
+        threshold = 0.26   # Lowered to match new FUSED_MATCH_THRESHOLD
+        k = 15.0           # Gentler curve — more visible results
     else:
         threshold = 0.50
         k = 18.0
