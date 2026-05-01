@@ -14,7 +14,7 @@ the same Supabase table.
 
 import hashlib
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, Form, HTTPException, Request
 
 from src.core.config import USE_CLUSTER_AWARE_SEARCH
 from src.core.security import get_verified_keys
@@ -42,7 +42,7 @@ def _user_id_from_key(pinecone_key: str) -> str:
     return hashlib.sha256(pinecone_key.encode()).hexdigest()[:16]
 
 
-@router.get("/api/people")
+@router.post("/api/people")
 async def list_people(
     request: Request,
     keys: dict = Depends(get_verified_keys),
@@ -51,16 +51,21 @@ async def list_people(
     Returns all identity clusters for the authenticated user, ordered by
     face_count descending (most-seen people first).
 
+    Request: FormData with user_pinecone_key + user_cloudinary_url
+
     Response shape:
-    [
-      {
-        "cluster_id": "uuid",
-        "name": "Mom" | null,
-        "face_count": 42,
-        "representative_face_crop": "<base64 jpg>"
-      },
-      ...
-    ]
+    {
+      "people": [
+        {
+          "cluster_id": "uuid",
+          "name": "Mom" | null,
+          "face_count": 42,
+          "representative_face_crop": "<base64 jpg>"
+        },
+        ...
+      ],
+      "total": 3
+    }
     """
     ip = get_ip(request)
     user_id = _user_id_from_key(keys["pinecone_key"])
@@ -74,7 +79,7 @@ async def list_people(
         raise HTTPException(500, f"Failed to fetch people: {e}")
 
 
-@router.get("/api/people/{cluster_id}")
+@router.post("/api/people/{cluster_id}")
 async def get_cluster_images(
     cluster_id: str,
     request: Request,
@@ -82,6 +87,8 @@ async def get_cluster_images(
 ):
     """
     Returns all images belonging to a specific identity cluster.
+
+    Request: FormData with user_pinecone_key + user_cloudinary_url
 
     Response shape:
     {
@@ -111,18 +118,18 @@ async def get_cluster_images(
         raise HTTPException(500, f"Failed to fetch cluster images: {e}")
 
 
-@router.patch("/api/people/{cluster_id}")
+@router.post("/api/people/{cluster_id}/rename")
 async def update_cluster_name(
     cluster_id: str,
     request: Request,
-    name: str = Body(..., embed=True),
+    name: str = Form(...),
     keys: dict = Depends(get_verified_keys),
 ):
     """
     Assigns a human-readable name to a cluster.
 
-    Request body (JSON): {"name": "Mom"}
-    Response:            {"cluster_id": "uuid", "name": "Mom", "ok": true}
+    Request: FormData with user_pinecone_key + user_cloudinary_url + name
+    Response: {"cluster_id": "uuid", "name": "Mom", "ok": true}
     """
     ip = get_ip(request)
     user_id = _user_id_from_key(keys["pinecone_key"])
