@@ -13,15 +13,24 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.core.config import MAX_CONCURRENT_INFERENCES, USE_ASYNC_UPLOADS
 from src.core.logging import log, init_logging_session, close_logging_session
-from src.api import danger, explorer, search, system, upload
-from src.api import people# Phase 3
-from src.api import jobs as jobs_api  # explicit alias
+from src.api import admin, gallery, search, system, upload, ui
+from src.api import people
+from src.api import jobs as jobs_api
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_logging_session()
     log("INFO", "server.startup", message="Loading AI models...")
+
+    if os.getenv("TESTING", "false").lower() == "true":
+        log("INFO", "server.startup", message="Running in TESTING mode — skipping heavy AI models")
+        app.state.ai = None
+        app.state.ai_semaphore = asyncio.Semaphore(MAX_CONCURRENT_INFERENCES)
+        app.state.face_semaphore = asyncio.Semaphore(MAX_CONCURRENT_INFERENCES)
+        app.state.object_semaphore = asyncio.Semaphore(MAX_CONCURRENT_INFERENCES)
+        yield
+        return
 
     from src.services.ai_manager import AIModelManager
 
@@ -60,7 +69,16 @@ app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://photofinderv2.vercel.app"],
+    allow_origins=[
+        "https://photofinderv2.vercel.app",
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://localhost:8000",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:8000",
+    ],
+    allow_origin_regex=r"https?://.*",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -68,13 +86,14 @@ app.add_middleware(
 
 os.makedirs("temp_uploads", exist_ok=True)
 
-# Existing routers
+# Routers
+app.include_router(ui.router)
 app.include_router(system.router)
 app.include_router(upload.router)
 app.include_router(search.router)
-app.include_router(explorer.router)
-app.include_router(danger.router)
+app.include_router(gallery.router)
+app.include_router(admin.router)
 
-# Phase 3 routers
+# Face clustering and job routers
 app.include_router(people.router)
 app.include_router(jobs_api.router)

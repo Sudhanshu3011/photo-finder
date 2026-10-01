@@ -1,193 +1,130 @@
 """
-src/api/people.py — Phase 3: People View endpoints
-
-GET  /api/people                → list all identity clusters
-GET  /api/people/{cluster_id}   → all images in that cluster
+src/api/people.py — People View endpoints for identity clustering and face albums.
+Backed by local FAISS vector stores, HDBSCAN clustering, and SQLite persistence.
+Endpoints:
+POST  /api/people                → list all identity clusters
+POST  /api/people/{cluster_id}   → all images in that cluster
 PATCH /api/people/{cluster_id}  → rename a cluster
-POST /api/reindex-clusters      → trigger full re-cluster
-
-All endpoints require the standard pinecone/cloudinary auth headers
-(via get_verified_keys). user_id is derived from the Pinecone key hash
-so different users don't see each other's clusters even though they share
-the same Supabase table.
+POST  /api/reindex-clusters      → trigger full re-clustering on FAISS vectors
 """
+import asyncio
+from typing import Optional
 
-import hashlib
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 
-from fastapi import APIRouter, Body, Depends, Form, HTTPException, Request
-
-from src.core.config import USE_CLUSTER_AWARE_SEARCH
-from src.core.security import get_verified_keys
 from src.core.logging import log
-from src.services.clustering import (
+from src.core.security import get_verified_keys, get_user_id
+from src.common.utils import get_ip
+from src.services.clustering_service import (
     get_people,
     get_person_images,
     rename_cluster,
     run_clustering,
 )
-from src.services.db_client import pinecone_pool, ensure_indexes
-from src.common.utils import get_ip
 
-import asyncio
-
-router = APIRouter()
+router = APIRouter(prefix="/api", tags=["People"])
 
 
-def _user_id_from_key(pinecone_key: str) -> str:
-    """
-    Derives a stable, opaque user_id from the Pinecone API key.
-    Users bring their own key, so this is the closest we have to an identity.
-    Short SHA256 prefix is enough for row isolation — not a security measure.
-    """
-    return hashlib.sha256(pinecone_key.encode()).hexdigest()[:16]
-
-
-@router.post("/api/people")
+@router.post(
+    "/people",
+    status_code=status.HTTP_200_OK,
+    summary="List identity clusters",
+    description="Returns all face identity clusters for the user, ordered by face count descending.",
+)
 async def list_people(
     request: Request,
+    user_id: str = Depends(get_user_id),
     keys: dict = Depends(get_verified_keys),
 ):
-    """
-    Returns all identity clusters for the authenticated user, ordered by
-    face_count descending (most-seen people first).
-
-    Request: FormData with user_pinecone_key + user_cloudinary_url
-
-    Response shape:
-    {
-      "people": [
-        {
-          "cluster_id": "uuid",
-          "name": "Mom" | null,
-          "face_count": 42,
-          "representative_face_crop": "<base64 jpg>"
-        },
-        ...
-      ],
-      "total": 3
-    }
-    """
     ip = get_ip(request)
-    user_id = _user_id_from_key(keys["pinecone_key"])
-
     try:
         people = await get_people(user_id)
         log("INFO", "people.list", ip=ip, user_id=user_id, count=len(people))
         return {"people": people, "total": len(people)}
     except Exception as e:
         log("ERROR", "people.list.error", ip=ip, user_id=user_id, error=str(e))
-        raise HTTPException(500, f"Failed to fetch people: {e}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Failed to fetch people: {e}")
 
 
-@router.post("/api/people/{cluster_id}")
+@router.post(
+    "/people/{cluster_id}",
+    status_code=status.HTTP_200_OK,
+    summary="List photos in cluster",
+    description="Returns all images associated with a specific identity cluster.",
+)
 async def get_cluster_images(
     cluster_id: str,
     request: Request,
+    user_id: str = Depends(get_user_id),
     keys: dict = Depends(get_verified_keys),
 ):
-    """
-    Returns all images belonging to a specific identity cluster.
-
-    Request: FormData with user_pinecone_key + user_cloudinary_url
-
-    Response shape:
-    {
-      "cluster_id": "uuid",
-      "images": [
-        {"url": "...", "thumb_url": "...", "folder": "...", "face_crop": "<base64>"},
-        ...
-      ],
-      "total": 12
-    }
-    """
     ip = get_ip(request)
-    user_id = _user_id_from_key(keys["pinecone_key"])
-
     try:
         images = await get_person_images(cluster_id, user_id)
-        log("INFO", "people.cluster_images",
-            ip=ip, user_id=user_id, cluster_id=cluster_id, count=len(images))
+        log("INFO", "people.images", ip=ip, user_id=user_id, cluster_id=cluster_id, count=len(images))
         return {
             "cluster_id": cluster_id,
             "images": images,
             "total": len(images),
         }
     except Exception as e:
-        log("ERROR", "people.cluster_images.error",
-            ip=ip, user_id=user_id, cluster_id=cluster_id, error=str(e))
-        raise HTTPException(500, f"Failed to fetch cluster images: {e}")
+        log("ERROR", "people.images.error", ip=ip, user_id=user_id, cluster_id=cluster_id, error=str(e))
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Failed to fetch cluster images: {e}")
 
 
-@router.post("/api/people/{cluster_id}/rename")
-async def update_cluster_name(
+@router.patch(
+    "/people/{cluster_id}",
+    status_code=status.HTTP_200_OK,
+    summary="Rename identity cluster",
+    description="Assigns a person name to an identity cluster album.",
+)
+async def update_person_name(
     cluster_id: str,
     request: Request,
-    name: str = Form(...),
+    name: str = Body(..., embed=True, description="New name for the person"),
+    user_id: str = Depends(get_user_id),
     keys: dict = Depends(get_verified_keys),
 ):
-    """
-    Assigns a human-readable name to a cluster.
-
-    Request: FormData with user_pinecone_key + user_cloudinary_url + name
-    Response: {"cluster_id": "uuid", "name": "Mom", "ok": true}
-    """
     ip = get_ip(request)
-    user_id = _user_id_from_key(keys["pinecone_key"])
-
-    if not name or len(name.strip()) == 0:
-        raise HTTPException(400, "name must be a non-empty string")
-    if len(name) > 100:
-        raise HTTPException(400, "name must be 100 characters or fewer")
-
+    clean_name = name.strip() if name else ""
     try:
-        await rename_cluster(cluster_id, name.strip(), user_id)
-        log("INFO", "people.rename",
-            ip=ip, user_id=user_id, cluster_id=cluster_id, name=name)
-        return {"cluster_id": cluster_id, "name": name.strip(), "ok": True}
+        ok = await rename_cluster(cluster_id, clean_name, user_id)
+        if not ok:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Cluster {cluster_id} not found.")
+
+        log("INFO", "people.renamed", ip=ip, user_id=user_id, cluster_id=cluster_id, name=clean_name)
+        return {
+            "status": "ok",
+            "cluster_id": cluster_id,
+            "name": clean_name,
+        }
+    except HTTPException:
+        raise
     except Exception as e:
-        log("ERROR", "people.rename.error",
-            ip=ip, user_id=user_id, cluster_id=cluster_id, error=str(e))
-        raise HTTPException(500, f"Failed to rename cluster: {e}")
+        log("ERROR", "people.rename.error", ip=ip, user_id=user_id, cluster_id=cluster_id, error=str(e))
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Failed to rename cluster: {e}")
 
 
-@router.post("/api/reindex-clusters")
+@router.post(
+    "/reindex-clusters",
+    status_code=status.HTTP_200_OK,
+    summary="Reindex and cluster face vectors",
+    description="Clusters all indexed face vectors using HDBSCAN over local FAISS embeddings.",
+)
 async def reindex_clusters(
     request: Request,
+    user_id: str = Depends(get_user_id),
     keys: dict = Depends(get_verified_keys),
 ):
-    """
-    Triggers a full HDBSCAN re-cluster of the user's face vectors.
-
-    This is a synchronous (blocking) endpoint — clustering typically takes
-    5-30 seconds depending on library size. For large libraries, consider
-    running this in a background task (Phase 4).
-
-    Response:
-    {
-      "status": "ok",
-      "total_vectors": 3200,
-      "clusters_found": 14,
-      "noise_vectors": 80
-    }
-    """
     ip = get_ip(request)
-    user_id = _user_id_from_key(keys["pinecone_key"])
-
     log("INFO", "people.reindex_start", ip=ip, user_id=user_id)
 
     try:
-        pc = pinecone_pool.get(keys["pinecone_key"])
-
-        # Ensure indexes exist before fetching vectors
-        await asyncio.to_thread(ensure_indexes, pc)
-
-        result = await run_clustering(pc, user_id)
+        result = await run_clustering(user_id)
         log("INFO", "people.reindex_done", ip=ip, user_id=user_id, **result)
         return result
-
     except RuntimeError as e:
-        # e.g. hdbscan not installed
-        raise HTTPException(503, str(e))
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(e))
     except Exception as e:
         log("ERROR", "people.reindex_error", ip=ip, user_id=user_id, error=str(e))
-        raise HTTPException(500, f"Clustering failed: {e}")
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, f"Clustering failed: {e}")

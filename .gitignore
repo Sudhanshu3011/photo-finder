@@ -1,1 +1,56 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environment & Secrets (NEVER push credentials to git)
+.env
+.env.*
+!.env.example
+
+# Virtual Environments
+venv/
+.venv/
+env/
+myenv/
 /myenv
+
+# Local Databases & Runtime Storage
+data/
+*.db
+*.sqlite
+*.sqlite3
+temp_uploads/
+
+# FAISS Vector Stores & Index binaries
+*.faiss
+*.index
+
+# Deep Learning weights & model checkpoints (downloaded at build/runtime)
+*.pt
+*.pth
+*.onnx
+*.bin
+*.safetensors
+onnx_models/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor & OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+logs/
+
+# Assistant / Agent configuration
+.agents/

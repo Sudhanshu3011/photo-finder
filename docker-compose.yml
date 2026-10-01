@@ -1,0 +1,20 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        HF_TOKEN: ${HF_TOKEN:-}
+    container_name: visual_search_api
+    ports:
+      - "7860:7860"
+    env_file:
+      - .env
+    volumes:
+      # Mount code live: editing code on your computer reloads immediately inside container!
+      - ./src:/app/src
+      - ./main.py:/app/main.py
+      # Keep uploaded files persistent outside container
+      - ./saved_images:/app/saved_images
+      - ./temp_uploads:/app/temp_uploads
+    restart: unless-stopped

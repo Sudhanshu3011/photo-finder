@@ -11,17 +11,20 @@ load_dotenv()
 # Credentals / Secrets (set in HF Space secrets) / KEYS / URLS
 # ===============================================================
 
-#Pinecone + Cloudinary credentials (set in HF Space secrets)
-DEFAULT_PINECONE_KEY = os.getenv("DEFAULT_PINECONE_KEY", "")
-DEFAULT_CLOUDINARY_URL = os.getenv("DEFAULT_CLOUDINARY_URL", "")
-#supbase Credentials
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+# Cloudinary CDN credentials (set in HF Space secrets or .env)
+DEFAULT_CLOUDINARY_URL = os.getenv("DEFAULT_CLOUDINARY_URL") or os.getenv("CLOUDINARY_URL", "")
+if not DEFAULT_CLOUDINARY_URL:
+    _c_name = os.getenv("CLOUDINARY_CLOUD_NAME", "")
+    _c_key = os.getenv("CLOUDINARY_API_KEY", "")
+    _c_sec = os.getenv("CLOUDINARY_API_SECRET", "")
+    if _c_name and _c_key and _c_sec:
+        DEFAULT_CLOUDINARY_URL = f"cloudinary://{_c_key}:{_c_sec}@{_c_name}"
+
+# FAISS Vector Store local directory
+FAISS_DATA_DIR = os.getenv("FAISS_DATA_DIR", "data/faiss")
+
 # HF Credentials
 HF_TOKEN = os.getenv("HF_TOKEN", "")
-# Upstash_Redis credentials
-UPSTASH_REDIS_URL = os.getenv("UPSTASH_REDIS_URL", "")
-UPSTASH_REDIS_TOKEN = os.getenv("UPSTASH_REDIS_TOKEN", "")
 
 # ===============================================================
 # Variables Set in HF Spaces Can be configured
