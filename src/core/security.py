@@ -9,7 +9,7 @@ from fastapi import Header, HTTPException, Request
 
 from src.core.config import DEFAULT_CLOUDINARY_URL
 from src.common.utils import get_cloudinary_creds
-from src.services.local_db import get_or_create_user
+from src.modules.infra.sqlite_repository import get_or_create_anonymous_user as get_or_create_user
 
 
 async def get_verified_keys(
@@ -34,7 +34,10 @@ async def get_verified_keys(
         if h_name and h_key and h_sec:
             cld_url = f"cloudinary://{h_key}:{h_sec}@{h_name}"
 
-    # If not in headers, inspect form body if available on POST/PUT
+    # If not in headers, inspect query params or form body if available
+    if not cld_url:
+        cld_url = request.query_params.get("cloudinary_url", "").strip()
+
     if request.method in ("POST", "PUT", "PATCH") and not cld_url:
         content_type = request.headers.get("content-type", "")
         if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
@@ -50,13 +53,21 @@ async def get_verified_keys(
             except Exception:
                 pass
 
+    # Check cached user or system level Cloudinary config
+    if not cld_url:
+        from src.modules.infra.kv_cache import get_kv_cache
+        cache = get_kv_cache()
+        cached_sys = cache.get("system_cld_config")
+        if cached_sys:
+            cld_url = str(cached_sys).strip()
+
     actual_cld_url = cld_url or DEFAULT_CLOUDINARY_URL
     creds = get_cloudinary_creds(actual_cld_url)
     if not creds.get("cloud_name"):
         raise HTTPException(
             400,
             "Cloudinary configuration is missing or invalid. Set DEFAULT_CLOUDINARY_URL in .env, "
-            "or pass the X-Cloudinary-Url header (or individual Cloudinary credentials)."
+            "or configure via POST /api/auth/cloudinary-config, or pass X-Cloudinary-Url header."
         )
 
     return {

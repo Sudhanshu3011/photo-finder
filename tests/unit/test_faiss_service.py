@@ -13,7 +13,7 @@ import shutil
 import pytest
 import numpy as np
 
-from src.services.faiss_service import FAISSVectorStore
+from src.modules.infra.faiss_engine import FAISSVectorStore
 
 
 @pytest.fixture
@@ -110,3 +110,37 @@ def test_delete_by_url(temp_faiss_store):
     remaining = temp_faiss_store.search(test_index, [0.6, 0.4], top_k=5)
     remaining_urls = [m["metadata"]["url"] for m in remaining]
     assert "https://img.com/delete_me.jpg" not in remaining_urls
+
+
+def test_dual_face_score_fusion(temp_faiss_store):
+    """Verify ArcFace + AdaFace dual storage and score fusion."""
+    from src.modules.search.vector_scorer import score_face_matches
+    from src.core.config import IDX_FACES_ARCFACE, IDX_FACES_ADAFACE
+
+    # Index ArcFace and AdaFace for the same face ID
+    arc_vec = [1.0] + [0.0] * 511
+    ada_vec = [1.0] + [0.0] * 511
+
+    temp_faiss_store.upsert_vectors(
+        IDX_FACES_ARCFACE,
+        vectors=[arc_vec],
+        ids=["face_1"],
+        metadata=[{"image_id": "img_1", "person_name": "Alice"}]
+    )
+    temp_faiss_store.upsert_vectors(
+        IDX_FACES_ADAFACE,
+        vectors=[ada_vec],
+        ids=["face_1"],
+        metadata=[{"image_id": "img_1", "person_name": "Alice"}]
+    )
+
+    arc_matches = temp_faiss_store.search(IDX_FACES_ARCFACE, arc_vec, top_k=5)
+    ada_matches = temp_faiss_store.search(IDX_FACES_ADAFACE, ada_vec, top_k=5)
+
+    assert len(arc_matches) == 1
+    assert len(ada_matches) == 1
+
+    fused = score_face_matches(arc_matches=arc_matches, ada_matches=ada_matches, threshold=0.2)
+    assert len(fused) == 1
+    assert fused[0]["image_id"] == "img_1"
+    assert fused[0]["score"] > 0.95

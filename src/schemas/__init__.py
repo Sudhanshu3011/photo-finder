@@ -1,25 +1,43 @@
 """Pydantic V2 Schemas for Visual Search API."""
-from src.schemas.common import BaseResponse, ErrorResponse, PaginationParams, PaginatedResponse
-from src.schemas.upload import UploadMetadata, UploadResponse, UploadVectorSummary, AsyncUploadQueuedResponse
-from src.schemas.search import SearchParams, SearchResponse, MatchItem, FaceGroupResult
-from src.schemas.jobs import JobStatusResponse
-from src.schemas.system import HealthResponse, FrontendLogRequest, VerifyKeysResponse
+
+from src.schemas.auth_schemas import (
+    RegisterRequest,
+    LoginRequest,
+    TokenResponse,
+    UserProfileResponse,
+)
+from src.schemas.upload_schemas import (
+    PhotoUploadItem,
+    PhotoUploadResponse,
+    BatchUploadResponse,
+)
+from src.schemas.processing_schemas import (
+    JobProgressResponse,
+    FaceClusterResponse,
+    ClusterRenameRequest,
+    ClusteringTriggerResponse,
+    ImageProcessResponse,
+)
+from src.schemas.search_schemas import (
+    MatchItem,
+    SearchResponse,
+    MultiAngleSearchRequest,
+)
 
 __all__ = [
-    "BaseResponse",
-    "ErrorResponse",
-    "PaginationParams",
-    "PaginatedResponse",
-    "UploadMetadata",
-    "UploadResponse",
-    "UploadVectorSummary",
-    "AsyncUploadQueuedResponse",
-    "SearchParams",
-    "SearchResponse",
+    "RegisterRequest",
+    "LoginRequest",
+    "TokenResponse",
+    "UserProfileResponse",
+    "PhotoUploadItem",
+    "PhotoUploadResponse",
+    "BatchUploadResponse",
+    "JobProgressResponse",
+    "FaceClusterResponse",
+    "ClusterRenameRequest",
+    "ClusteringTriggerResponse",
+    "ImageProcessResponse",
     "MatchItem",
-    "FaceGroupResult",
-    "JobStatusResponse",
-    "HealthResponse",
-    "FrontendLogRequest",
-    "VerifyKeysResponse",
+    "SearchResponse",
+    "MultiAngleSearchRequest",
 ]

@@ -54,3 +54,7 @@ logs/
 
 # Assistant / Agent configuration
 .agents/
+saved_images/
+Test-01/
+docs/
+temp_uploads/

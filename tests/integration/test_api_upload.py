@@ -1,65 +1,49 @@
 """
-tests/integration/test_api_upload.py — Integration tests for image upload and indexing endpoint.
-Tests multipart file uploads with form metadata, dependency overrides, and error edge cases.
+tests/integration/test_api_upload.py — Integration tests for image upload and ingestion endpoint.
 """
 import io
 import pytest
 from httpx import AsyncClient
+from conftest import create_mock_jpeg
 
 
 @pytest.mark.asyncio
 async def test_upload_images_sync_success(client: AsyncClient):
-    """
-    Test uploading multiple mock files with metadata.
-    Uses MockUploadService via FastAPI dependency injection.
-    """
-    mock_file1 = ("test1.jpg", io.BytesIO(b"dummy image 1 bytes"), "image/jpeg")
-    mock_file2 = ("test2.png", io.BytesIO(b"dummy image 2 bytes"), "image/png")
+    """Test uploading single image via clean /api/upload/photo endpoint."""
+    img_bytes = create_mock_jpeg(120, 120)
+    files = {"file": ("test1.jpg", img_bytes, "image/jpeg")}
 
-    files = [
-        ("files", mock_file1),
-        ("files", mock_file2),
+    response = await client.post("/api/upload/photo", files=files)
+    assert response.status_code == 201
+
+    body = response.json()
+    assert body["status"] == "success"
+    assert "image_id" in body["data"]
+    assert body["data"]["width"] == 120
+    assert body["data"]["height"] == 120
+
+
+@pytest.mark.asyncio
+async def test_upload_images_batch_mode(client: AsyncClient):
+    """Test batch upload via clean /api/upload/batch endpoint."""
+    batch_files = [
+        ("files", ("pic1.jpg", create_mock_jpeg(100, 100), "image/jpeg")),
+        ("files", ("pic2.jpg", create_mock_jpeg(100, 100), "image/jpeg")),
     ]
-    data = {
-        "folder_name": "vacation_photos",
-        "detect_faces": "true",
-        "user_id": "test_user_1",
-    }
 
-    response = await client.post("/api/upload", files=files, data=data)
-    assert response.status_code == 200
+    response = await client.post("/api/upload/batch", files=batch_files)
+    assert response.status_code == 201
 
     body = response.json()
-    assert body["message"] == "Done!"
-    assert len(body["urls"]) == 2
-    assert body["summary"]["files"] == 2
-    assert body["summary"]["face_vectors"] == 2
-
-
-@pytest.mark.asyncio
-async def test_upload_images_async_mode(client: AsyncClient):
-    """Test async upload enqueue mode."""
-    mock_file = ("async_test.jpg", io.BytesIO(b"async dummy bytes"), "image/jpeg")
-    files = [("files", mock_file)]
-    data = {
-        "folder_name": "background_batch",
-        "detect_faces": "false",
-    }
-
-    response = await client.post("/api/upload?async=true", files=files, data=data)
-    assert response.status_code == 200
-
-    body = response.json()
-    assert body["message"] == "Upload queued"
+    assert body["total"] == 2
+    assert body["successful"] == 2
     assert "job_id" in body
-    assert body["total_files"] == 1
 
 
 @pytest.mark.asyncio
-async def test_upload_missing_folder_name_fails(client: AsyncClient):
-    """Test that missing required folder_name returns 422 Unprocessable Entity."""
-    mock_file = ("test.jpg", io.BytesIO(b"dummy bytes"), "image/jpeg")
-    files = [("files", mock_file)]
+async def test_upload_empty_file_fails(client: AsyncClient):
+    """Test that uploading an empty 0-byte file returns 400 Bad Request."""
+    files = {"file": ("empty.jpg", b"", "image/jpeg")}
 
-    response = await client.post("/api/upload", files=files, data={})
-    assert response.status_code == 422
+    response = await client.post("/api/upload/photo", files=files)
+    assert response.status_code == 400

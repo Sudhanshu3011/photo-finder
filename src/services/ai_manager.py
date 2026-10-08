@@ -437,7 +437,7 @@ class AIModelManager:
         except Exception:
             return []
 
-    def _detect_and_encode_faces(self, img_np: np.ndarray) -> list[dict]:
+    def _detect_and_encode_faces(self, img_np: np.ndarray, is_bgr: bool = False) -> list[dict]:
         """
         Returns face records with BOTH arcface_vector and adaface_vector.
 
@@ -450,7 +450,10 @@ class AIModelManager:
         try:
             if img_np.dtype != np.uint8:
                 img_np = (img_np * 255).astype(np.uint8)
-            bgr = img_np[:, :, ::-1].copy() if img_np.shape[2] == 3 else img_np.copy()
+            if is_bgr:
+                bgr = img_np.copy()
+            else:
+                bgr = img_np[:, :, ::-1].copy() if (len(img_np.shape) == 3 and img_np.shape[2] == 3) else img_np.copy()
             bgr_enhanced = _clahe_enhance(bgr)
             H, W = bgr.shape[:2]
 
@@ -536,20 +539,9 @@ class AIModelManager:
                     "adaface_vector": adaface_vec if adaface_vec is not None
                                       else np.zeros(ADAFACE_DIM, dtype=np.float32),
                     "has_adaface": adaface_vec is not None,
+                    "vector": arcface_vec,
+                    "face_obj": face,
                 }
-
-                if not USE_SPLIT_FACE_INDEXES:
-                    if adaface_vec is not None:
-                        fused_raw = np.concatenate([arcface_vec, adaface_vec])
-                    else:
-                        fused_raw = np.concatenate(
-                            [arcface_vec, np.zeros(ADAFACE_DIM, dtype=np.float32)]
-                        )
-                    n2 = np.linalg.norm(fused_raw)
-                    out["vector"] = (fused_raw / n2) if n2 > 0 else fused_raw
-                else:
-                    out["vector"] = arcface_vec
-
                 results.append(out)
             return results
         except Exception as _det_err:
@@ -626,6 +618,16 @@ class AIModelManager:
             self._cache[cache_key] = list(extracted)
 
         return extracted
+
+    def extract_object_embedding(self, cv_img: np.ndarray) -> np.ndarray:
+        """Extract visual scene / object embedding using SigLIP + DINOv2."""
+        if cv_img is None or cv_img.size == 0:
+            return np.array([], dtype=np.float32)
+        rgb = cv_img[:, :, ::-1] if (len(cv_img.shape) == 3 and cv_img.shape[2] == 3) else cv_img
+        pil = Image.fromarray(rgb)
+        pil_resized = _resize_pil(pil, MAX_IMAGE_SIZE)
+        vecs = self._embed_crops_batch([pil_resized])
+        return vecs[0] if vecs else np.array([], dtype=np.float32)
 
     async def process_image_bytes_async(
         self, image_bytes: bytes, detect_faces: bool = True

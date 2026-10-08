@@ -101,3 +101,12 @@ def face_ui_score(raw_score: float, mode: str = "fused") -> float:
 
     probability = 1 / (1 + math.exp(-k * (raw_score - threshold)))
     return min(1.0, max(0.0, round(probability, 4)))
+
+
+async def fetch_image_bytes_from_url(url: str, timeout: float = 15.0) -> bytes:
+    """Download image bytes from an HTTP/HTTPS URL (e.g. Cloudinary CDN)."""
+    import httpx
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        return resp.content

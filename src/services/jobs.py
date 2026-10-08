@@ -13,8 +13,8 @@ from typing import Any, Optional
 
 from src.core.config import USE_ASYNC_UPLOADS, CLUSTER_AUTO_TRIGGER_EVERY
 from src.core.logging import log, warn
-from src.services.cache import cache
-from src.services.local_db import (
+from src.modules.infra.kv_cache import cache
+from src.modules.infra.sqlite_repository import (
     db_create_job,
     db_get_job,
     db_update_job,
@@ -119,11 +119,10 @@ async def update_job_progress(
     cached = await cache.get_json(f"job:{job_id}") or {}
     cached.update(patch)
     cached["current_stage"] = stage
+    await cache.set_json(f"job:{job_id}", cached, ttl=JOB_TTL)
 
     if log_msg:
         await append_job_log(job_id, log_msg, stage=stage)
-    else:
-        await cache.set_json(f"job:{job_id}", cached, ttl=JOB_TTL)
 
     log(
         "INFO",
@@ -226,9 +225,96 @@ async def run_worker(app_state) -> None:
             await asyncio.sleep(5)
 
 
+async def process_one_file(
+    *,
+    file_bytes: bytes,
+    folder: str,
+    detect_faces: bool,
+    keys: dict,
+    ai,
+    sem,
+):
+    import io
+    from src.modules.storage.cloudinary_storage import upload_to_cloudinary
+    file_id = uuid.uuid4().hex
+
+    async def _run_ai():
+        async with sem:
+            return await ai.process_image_bytes_async(file_bytes, detect_faces=detect_faces)
+
+    cld_task = asyncio.to_thread(
+        upload_to_cloudinary, io.BytesIO(file_bytes), folder, keys.get("cloudinary_creds", {})
+    )
+    ai_task = _run_ai()
+    cld_res, vectors = await asyncio.gather(cld_task, ai_task)
+    return file_id, cld_res.get("secure_url", ""), vectors
+
+
+async def batch_upsert_all(*, results: list, folder: str, vector_store=None) -> dict:
+    from src.modules.infra.faiss_engine import vector_engine
+    from src.common.utils import to_list
+    from src.core.config import (
+        IDX_FACES,
+        IDX_OBJECTS,
+        IDX_FACES_ARCFACE,
+        IDX_FACES_ADAFACE,
+    )
+    store = vector_store or vector_engine
+    arcface_upserts = []
+    adaface_upserts = []
+    object_upserts = []
+    uploaded_urls = []
+
+    for file_id, image_url, vectors in results:
+        uploaded_urls.append(image_url)
+        for i, v in enumerate(vectors):
+            vector_id = f"{file_id}_{i}"
+            if v.get("type") == "face":
+                meta_common = {
+                    "url": image_url,
+                    "folder": folder,
+                    "face_crop": v.get("face_crop", ""),
+                    "det_score": float(v.get("det_score", 1.0)),
+                    "face_width_px": int(v.get("face_width_px", 0)),
+                    "blur_score": float(v.get("blur_score", 100.0)),
+                }
+                arcface_upserts.append({
+                    "id": vector_id,
+                    "values": to_list(v["arcface_vector"]),
+                    "metadata": meta_common,
+                })
+                if v.get("has_adaface") and v.get("adaface_vector") is not None:
+                    adaface_upserts.append({
+                        "id": vector_id,
+                        "values": to_list(v["adaface_vector"]),
+                        "metadata": meta_common,
+                    })
+            elif v.get("type") == "object":
+                object_upserts.append({
+                    "id": vector_id,
+                    "values": to_list(v["vector"]),
+                    "metadata": {"url": image_url, "folder": folder},
+                })
+
+    # Delegate all vector insertions directly to FAISSEngine
+    if arcface_upserts:
+        store.upsert_vectors(IDX_FACES_ARCFACE, arcface_upserts)
+        store.upsert_vectors(IDX_FACES, arcface_upserts)
+    if adaface_upserts:
+        store.upsert_vectors(IDX_FACES_ADAFACE, adaface_upserts)
+    if object_upserts:
+        store.upsert_vectors(IDX_OBJECTS, object_upserts)
+
+    return {
+        "uploaded_urls": uploaded_urls,
+        "arcface_vecs": len(arcface_upserts),
+        "adaface_vecs": len(adaface_upserts),
+        "object_vecs": len(object_upserts),
+    }
+
+
 async def _execute_upload_job(job_id: str, payload: dict, app_state) -> None:
-    from src.services.upload_service import batch_upsert_all
-    from src.services.faiss_service import faiss_store
+    from src.modules.infra.faiss_engine import vector_engine as faiss_store
 
     files_list = payload.get("files", [])
     files_data = payload.get("files_data", [])
@@ -295,7 +381,6 @@ async def _execute_upload_job(job_id: str, payload: dict, app_state) -> None:
 
         # Mode B: Direct memory/payload fallback (if files_data was passed)
         elif files_data:
-            from src.services.upload_service import process_one_file
             CHUNK = 10
             for chunk_start in range(0, total, CHUNK):
                 chunk = files_data[chunk_start:chunk_start + CHUNK]
@@ -345,8 +430,8 @@ async def _execute_upload_job(job_id: str, payload: dict, app_state) -> None:
         # Step 3: Auto-trigger clustering if threshold crossed
         if CLUSTER_AUTO_TRIGGER_EVERY > 0 and summary["arcface_vecs"] > 0:
             try:
-                from src.services.clustering_service import run_clustering
-                await run_clustering(user_id=user_id)
+                from src.services.image_processing_service import ImageProcessingService
+                ImageProcessingService().trigger_face_clustering()
                 await append_job_log(job_id, "Face identity albums re-clustered successfully.")
             except Exception as ce:
                 warn(f"Auto-clustering warning: {ce}")
