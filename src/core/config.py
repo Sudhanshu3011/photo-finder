@@ -78,6 +78,8 @@ CLUSTERING_BLUR_THRESHOLD = float(os.getenv("CLUSTERING_BLUR_THRESHOLD", "30.0")
 FACE_DIM = 512
 ADAFACE_DIM = 512
 FUSED_FACE_DIM = 1024
+OBJECT_DIM = 1536  # SigLIP (768) + DINOv2 (768) fused embedding
+
 
 FACE_CROP_THUMB_SIZE = int(os.getenv("FACE_CROP_THUMB_SIZE", "112"))
 FACE_CROP_QUALITY = int(os.getenv("FACE_CROP_QUALITY", "85"))
@@ -123,6 +125,7 @@ FUSED_MATCH_THRESHOLD = float(os.getenv("FUSED_MATCH_THRESHOLD", "0.26"))
 # Lowered from 0.38 to 0.28 — still strict enough to reject imposters while
 # capturing same-person photos across diverse angles/lighting.
 ARCFACE_SOLO_THRESHOLD = float(os.getenv("ARCFACE_SOLO_THRESHOLD", "0.28"))
+OBJECT_MATCH_THRESHOLD = float(os.getenv("OBJECT_MATCH_THRESHOLD", "0.25"))
 
 # Query-time augmentation: OFF by default, enabled via deep_search form flag
 ENABLE_QUERY_TIME_AUG = int(os.getenv("ENABLE_QUERY_TIME_AUG", "0"))

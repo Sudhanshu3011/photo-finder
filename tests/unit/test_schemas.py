@@ -1,61 +1,83 @@
 """
-tests/unit/test_schemas.py — Unit tests for Pydantic V2 schemas.
-Verifies input validation, error handling, and payload schemas.
+tests/unit/test_schemas.py — Unit tests for modern Pydantic V2 schemas.
+Verifies validation rules, defaults, and serializations for the modular schema architecture.
 """
 import pytest
 from pydantic import ValidationError
 
-from src.schemas.common import BaseResponse, ErrorResponse, PaginationParams
-from src.schemas.upload import UploadMetadata, UploadResponse, UploadVectorSummary
-from src.schemas.system import FrontendLogRequest, HealthResponse
-from src.schemas.jobs import JobStatusResponse
+from src.schemas.auth_schemas import RegisterRequest, LoginRequest, TokenResponse, UserProfileResponse
+from src.schemas.upload_schemas import PhotoUploadItem, PhotoUploadResponse, BatchUploadResponse
+from src.schemas.processing_schemas import JobProgressResponse, FaceClusterResponse, ClusterRenameRequest
+from src.schemas.search_schemas import MatchItem, SearchResponse
 
 
-def test_base_response():
-    resp = BaseResponse(success=True, message="Test OK")
-    assert resp.success is True
-    assert resp.message == "Test OK"
+def test_auth_schemas_validation():
+    # Valid register request
+    reg = RegisterRequest(username="testuser", email="test@example.com", password="securepassword")
+    assert reg.username == "testuser"
+    assert reg.email == "test@example.com"
+    assert reg.password == "securepassword"
+    assert reg.role == "user"
 
-
-def test_upload_vector_summary_validation():
-    summary = UploadVectorSummary(
-        files=3,
-        face_vectors=5,
-        adaface_vectors=5,
-        object_vectors=3,
-        index_mode="split",
-    )
-    assert summary.files == 3
-    assert summary.face_vectors == 5
-
-    # Should raise error if negative
+    # Missing required password
     with pytest.raises(ValidationError):
-        UploadVectorSummary(files=-1)
+        RegisterRequest(username="testuser", email="test@example.com")
 
 
-def test_frontend_log_request():
-    payload = FrontendLogRequest(
-        event="user_search_clicked",
-        user_id="user_42",
-        page="/gallery",
-        metadata={"query": "beach", "results_count": 12},
+def test_upload_schemas():
+    item = PhotoUploadItem(
+        image_id="img_100",
+        filename="photo.jpg",
+        status="uploaded",
+        cloud_url="https://cloudinary.com/test.jpg"
     )
-    assert payload.event == "user_search_clicked"
-    assert payload.metadata["results_count"] == 12
+    resp = PhotoUploadResponse(status="success", data=item)
+    assert resp.status == "success"
+    assert resp.data.image_id == "img_100"
 
-    # Event is required
+    batch = BatchUploadResponse(
+        job_id="job_123",
+        total=1,
+        successful=1,
+        failed=0,
+        items=[item]
+    )
+    assert batch.total == 1
+    assert len(batch.items) == 1
+
+
+def test_processing_schemas():
+    job = JobProgressResponse(
+        job_id="job_999",
+        status="processing",
+        total_images=5,
+        processed_images=2,
+    )
+    assert job.job_id == "job_999"
+    assert job.total_images == 5
+    assert job.processed_images == 2
+
+    rename = ClusterRenameRequest(person_name="Alice")
+    assert rename.person_name == "Alice"
+
     with pytest.raises(ValidationError):
-        FrontendLogRequest()
+        ClusterRenameRequest()  # person_name required
 
 
-def test_job_status_response():
-    job = JobStatusResponse(
-        job_id="job_abc123",
-        status="completed",
-        total_files=10,
-        processed_files=10,
-        progress_pct=100,
-        status_url="/api/jobs/job_abc123",
+def test_search_schemas():
+    item = MatchItem(
+        image_id="img_1",
+        score=0.92,
+        person_name="Bob",
+        cluster_id="cluster_1"
     )
-    assert job.status == "completed"
-    assert job.progress_pct == 100
+    assert item.score == 0.92
+    assert item.person_name == "Bob"
+
+    search_resp = SearchResponse(
+        query_type="face",
+        total_matches=1,
+        results=[item]
+    )
+    assert search_resp.query_type == "face"
+    assert len(search_resp.results) == 1

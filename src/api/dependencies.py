@@ -1,14 +1,16 @@
 """
 src/api/dependencies.py — Centralized FastAPI Dependency Injection providers.
 Decouples router endpoints from concrete service instances, enabling seamless unit testing and mocking.
-Injects local FAISS vector stores and AI model managers.
 """
-from fastapi import Depends, Request
+from typing import Optional, Dict, Any
+from fastapi import Depends, Header, HTTPException, Request, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-from src.core.security import get_verified_keys
-from src.services.upload_service import UploadService
-from src.services.search_service import SearchService
-from src.services.faiss_service import faiss_store
+from src.services.user_auth_service import get_auth_service, UserAuthService
+from src.services.image_processing_service import ImageProcessingService
+from src.services.image_search_service import ImageSearchService
+
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 def get_ai_manager(request: Request):
@@ -21,34 +23,57 @@ def get_ai_semaphore(request: Request):
     return getattr(request.app.state, "ai_semaphore", None)
 
 
-def get_vector_store():
-    """Retrieve FAISS Vector Store singleton."""
-    return faiss_store
+def get_current_user(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+    auth_service: UserAuthService = Depends(get_auth_service),
+) -> Optional[Dict[str, Any]]:
+    """Extract and verify user from Bearer authorization header if present."""
+    token = None
+    if credentials and credentials.credentials:
+        token = credentials.credentials
+    else:
+        raw_header = request.headers.get("authorization")
+        if raw_header:
+            scheme, _, raw_token = raw_header.partition(" ")
+            if scheme.lower() == "bearer" and raw_token:
+                token = raw_token.strip()
+
+    if not token:
+        return None
+    return auth_service.verify_token(token)
 
 
-def get_upload_service(
+def require_current_user(
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """Dependency requiring an authenticated user."""
+    if not current_user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return current_user
+
+
+def get_image_processing_service(
     request: Request,
     ai=Depends(get_ai_manager),
-    sem=Depends(get_ai_semaphore),
-    vector_store=Depends(get_vector_store),
-) -> UploadService:
-    """Factory dependency injecting UploadService with AI and local FAISS vector store."""
-    return UploadService(
-        ai=ai,
-        ai_semaphore=sem,
-        vector_store=vector_store,
-    )
+) -> ImageProcessingService:
+    """Dependency injecting ImageProcessingService."""
+    return ImageProcessingService(ai=ai)
 
 
-def get_search_service(
+def get_image_search_service(
     request: Request,
     ai=Depends(get_ai_manager),
-    sem=Depends(get_ai_semaphore),
-    vector_store=Depends(get_vector_store),
-) -> SearchService:
-    """Factory dependency injecting SearchService with AI and local FAISS vector store."""
-    return SearchService(
-        ai=ai,
-        ai_semaphore=sem,
-        vector_store=vector_store,
-    )
+) -> ImageSearchService:
+    """Dependency injecting ImageSearchService."""
+    return ImageSearchService(ai=ai)
+
+
+from src.services.photo_upload_service import get_upload_service
+
+get_search_service = get_image_search_service
+

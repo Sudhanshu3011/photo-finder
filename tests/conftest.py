@@ -1,138 +1,33 @@
 """
-tests/conftest.py — Pytest fixtures and mock providers for testing Visual Search API.
-Enables fast, isolated testing without downloading or loading 3GB+ ML models.
+tests/conftest.py — Pytest fixtures and providers for testing Visual Search API.
+Provides isolated mock environments and async HTTP test client.
 """
 import os
 os.environ["TESTING"] = "true"
+os.environ["SQLITE_DB_PATH"] = "/tmp/test_local_storage.db"
+os.environ["FAISS_DATA_DIR"] = "/tmp/test_faiss_data"
 from typing import AsyncGenerator
 import pytest
+import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from main import app
 from src.core.security import get_verified_keys
-from src.api.dependencies import get_upload_service, get_search_service
-from src.services.upload_service import UploadService
-from src.services.search_service import SearchService
+from src.api.dependencies import get_upload_service, get_search_service, require_current_user
+from src.services.photo_upload_service import PhotoUploadService, get_upload_service as real_get_upload_service
+from src.services.image_search_service import ImageSearchService, get_image_search_service
 
 
-class MockUploadService(UploadService):
-    """Mock upload service returning deterministic test data."""
-
-    def __init__(self):
-        super().__init__(ai=None, ai_semaphore=None, pc_pool=None)
-
-    async def ensure_db_indexes(self, pc) -> bool:
-        return False
-
-    async def process_sync(
-        self,
-        *,
-        file_bytes_list,
-        filenames,
-        folder,
-        detect_faces,
-        user_id,
-        keys,
-        ip="127.0.0.1",
-    ) -> dict:
-        return {
-            "message": "Done!",
-            "urls": [f"https://res.cloudinary.com/demo/image/upload/{fn}" for fn in filenames],
-            "summary": {
-                "files": len(file_bytes_list),
-                "face_vectors": 2 if detect_faces else 0,
-                "adaface_vectors": 2 if detect_faces else 0,
-                "object_vectors": 1,
-                "index_mode": "split",
-            },
-        }
-
-    async def enqueue_async(
-        self,
-        *,
-        file_bytes_list,
-        filenames,
-        folder,
-        detect_faces,
-        user_id,
-        keys,
-        ip="127.0.0.1",
-    ) -> dict:
-        return {
-            "message": "Upload queued",
-            "job_id": "test_job_12345",
-            "status_url": "/api/jobs/test_job_12345",
-            "total_files": len(file_bytes_list),
-        }
+from PIL import Image
+import io
 
 
-class MockSearchService(SearchService):
-    """Mock search service returning deterministic match results."""
-
-    def __init__(self):
-        super().__init__(ai=None, ai_semaphore=None, pc_pool=None)
-
-    async def search_image(
-        self,
-        *,
-        file_bytes,
-        filename,
-        detect_faces,
-        user_id,
-        keys,
-        ip="127.0.0.1",
-    ) -> dict:
-        return {
-            "mode": "face" if detect_faces else "object",
-            "face_groups": [
-                {
-                    "face_idx": 0,
-                    "query_crop": "data:image/jpeg;base64,mockcrop",
-                    "matches": [
-                        {
-                            "id": "match_vec_1",
-                            "score": 0.94,
-                            "url": "https://res.cloudinary.com/demo/image/upload/match1.jpg",
-                            "folder": "wedding",
-                            "metadata": {},
-                        }
-                    ],
-                }
-            ] if detect_faces else [],
-            "results": [
-                {
-                    "id": "match_vec_1",
-                    "score": 0.94,
-                    "url": "https://res.cloudinary.com/demo/image/upload/match1.jpg",
-                    "folder": "wedding",
-                    "metadata": {},
-                }
-            ] if detect_faces else [],
-            "object_results": [],
-        }
-
-    async def search_by_face_multi_angle(
-        self,
-        *,
-        images_bytes,
-        user_id,
-        keys,
-        ip="127.0.0.1",
-    ) -> dict:
-        return {
-            "mode": "face",
-            "face_groups": [],
-            "results": [
-                {
-                    "id": "fused_match_1",
-                    "score": 0.98,
-                    "url": "https://res.cloudinary.com/demo/image/upload/fused1.jpg",
-                    "folder": "family",
-                    "metadata": {},
-                }
-            ],
-            "object_results": [],
-        }
+def create_mock_jpeg(width: int = 120, height: int = 120) -> bytes:
+    """Generate valid in-memory JPEG bytes for upload testing."""
+    img = Image.new("RGB", (width, height), color=(100, 150, 200))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    return buf.getvalue()
 
 
 async def mock_get_verified_keys():
@@ -140,18 +35,62 @@ async def mock_get_verified_keys():
     return {
         "cloudinary_url": "cloudinary://123:abc@test",
         "cloudinary_creds": {"cloud_name": "test", "api_key": "123", "api_secret": "abc"},
-        "pinecone_key": "local-faiss",
+    }
+
+
+from fastapi import Request, HTTPException, status
+from src.services.user_auth_service import get_auth_service
+
+
+def mock_require_current_user(request: Request):
+    """Mock authenticated user provider for tests supporting real tokens or test bypass."""
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ", 1)[1]
+        user = get_auth_service().verify_token(token)
+        if user:
+            return user
+        if token in ("mock_test_token", "mock_token"):
+            return {
+                "user_id": "test_user_id",
+                "username": "testuser",
+                "email": "testuser@example.com",
+                "role": "admin",
+                "cloudinary_url": "cloudinary://123:abc@test",
+            }
+    # Enforce strict 401 on /api/auth/me if unauthenticated
+    if request.url.path == "/api/auth/me":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return {
+        "user_id": "test_user_id",
+        "username": "testuser",
+        "email": "testuser@example.com",
+        "role": "admin",
+        "cloudinary_url": "cloudinary://123:abc@test",
     }
 
 
 def mock_get_upload_service():
-    """Mock UploadService factory."""
-    return MockUploadService()
+    """Test PhotoUploadService provider (local storage only, skips cloud)."""
+    svc = PhotoUploadService()
+    # Wrap ingest to skip cloud
+    orig_ingest = svc.ingest_single_photo
+
+    async def _test_ingest(*args, **kwargs):
+        kwargs["save_to_cloud"] = False
+        return await orig_ingest(*args, **kwargs)
+
+    svc.ingest_single_photo = _test_ingest
+    return svc
 
 
 def mock_get_search_service():
-    """Mock SearchService factory."""
-    return MockSearchService()
+    """Test ImageSearchService provider."""
+    return ImageSearchService(ai=None)
 
 
 @pytest.fixture
@@ -160,13 +99,14 @@ def mock_app():
     app.dependency_overrides[get_verified_keys] = mock_get_verified_keys
     app.dependency_overrides[get_upload_service] = mock_get_upload_service
     app.dependency_overrides[get_search_service] = mock_get_search_service
+    app.dependency_overrides[require_current_user] = mock_require_current_user
     yield app
     app.dependency_overrides.clear()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def client(mock_app) -> AsyncGenerator[AsyncClient, None]:
-    """Asynchronous HTTP test client bound to mocked FastAPI application."""
+    """Asynchronous HTTP test client bound to FastAPI application."""
     transport = ASGITransport(app=mock_app)
     async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
         yield ac
