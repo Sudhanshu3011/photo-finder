@@ -43,10 +43,9 @@ def process_uploaded_image(
 
 
 @router.post("/api/clusters/generate", response_model=ClusteringTriggerResponse)
-@router.post("/api/process/cluster-faces", response_model=ClusteringTriggerResponse, include_in_schema=False)
 async def trigger_face_clustering(
     request: Request,
-    folder_name: Optional[str] = Query(None, description="Cloudinary folder name to cluster faces from"),
+    folder_name: str = Query(..., description="Cloudinary folder name to cluster faces from"),
     min_cluster_size: int = Query(3, ge=2, description="Minimum face count required to form an identity cluster"),
     epsilon: float = Query(0.25, ge=0.01, le=1.0, description="DBSCAN / HDBSCAN cluster distance tolerance"),
     service: ImageProcessingService = Depends(get_image_processing_service),
@@ -54,20 +53,14 @@ async def trigger_face_clustering(
 ):
     """
     Run HDBSCAN clustering over extracted face embeddings to group identities into albums.
-    Can be scoped to a specific folder_name.
+    Requires a valid folder_name.
     """
-    target_folder = folder_name
+    target_folder = folder_name.strip() if folder_name else ""
     if not target_folder:
-        try:
-            body = await request.json()
-            if isinstance(body, dict):
-                target_folder = body.get("folder_name") or body.get("folder")
-                if "min_cluster_size" in body and body["min_cluster_size"]:
-                    min_cluster_size = int(body["min_cluster_size"])
-                if "epsilon" in body and body["epsilon"]:
-                    epsilon = float(body["epsilon"])
-        except Exception:
-            pass
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="folder_name must not be empty"
+        )
 
     user_id = current_user.get("user_id")
     res = service.trigger_face_clustering(
@@ -85,7 +78,6 @@ async def trigger_face_clustering(
 
 
 @router.get("/api/clusters", response_model=List[FaceClusterResponse])
-@router.get("/api/process/clusters", response_model=List[FaceClusterResponse], include_in_schema=False)
 def get_all_clusters(
     folder_name: Optional[str] = Query(None, description="Filter clusters by Cloudinary folder name"),
     service: ImageProcessingService = Depends(get_image_processing_service),
@@ -98,7 +90,6 @@ def get_all_clusters(
 
 
 @router.patch("/api/clusters/{cluster_id}", response_model=FaceClusterResponse)
-@router.patch("/api/process/clusters/{cluster_id}", response_model=FaceClusterResponse, include_in_schema=False)
 def rename_face_cluster(
     cluster_id: str,
     req: ClusterRenameRequest,

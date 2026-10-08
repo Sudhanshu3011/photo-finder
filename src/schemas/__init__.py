@@ -10,7 +10,6 @@ from src.schemas.upload_schemas import (
     PhotoUploadItem,
     PhotoUploadResponse,
     BatchUploadResponse,
-    CategoryListResponse,
 )
 from src.schemas.processing_schemas import (
     JobProgressResponse,
@@ -33,7 +32,6 @@ __all__ = [
     "PhotoUploadItem",
     "PhotoUploadResponse",
     "BatchUploadResponse",
-    "CategoryListResponse",
     "JobProgressResponse",
     "FaceClusterResponse",
     "ClusterRenameRequest",

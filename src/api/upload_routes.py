@@ -7,7 +7,6 @@ from src.schemas.upload_schemas import (
     PhotoUploadResponse,
     BatchUploadResponse,
     FolderSyncResponse,
-    CategoryListResponse,
 )
 from src.services.photo_upload_service import PhotoUploadService, get_upload_service
 from src.api.dependencies import require_current_user
@@ -153,16 +152,6 @@ async def ingest_from_cloudinary_folder(
         synced=res["synced"],
         failed=res["failed"],
         items=[PhotoUploadItem(**item) for item in res["items"]]
-    )
-
-
-@router.get("/categories", response_model=CategoryListResponse)
-def get_categories(
-    current_user: dict = Depends(require_current_user)
-):
-    """Retrieve supported photo categories and tags."""
-    return CategoryListResponse(
-        categories=["people", "portraits", "events", "nature", "objects", "documents"]
     )
 
 

@@ -9,6 +9,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from src.services.user_auth_service import get_auth_service, UserAuthService
 from src.services.image_processing_service import ImageProcessingService
 from src.services.image_search_service import ImageSearchService
+from src.services.photo_upload_service import get_upload_service
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -72,8 +73,6 @@ def get_image_search_service(
     """Dependency injecting ImageSearchService."""
     return ImageSearchService(ai=ai)
 
-
-from src.services.photo_upload_service import get_upload_service
 
 get_search_service = get_image_search_service
 

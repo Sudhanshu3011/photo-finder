@@ -30,7 +30,6 @@ class FolderSyncResponse(BaseModel):
     failed: int
     items: List[PhotoUploadItem]
 
-class CategoryListResponse(BaseModel):
-    categories: List[str]
+
 
 

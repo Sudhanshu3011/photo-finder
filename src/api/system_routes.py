@@ -9,7 +9,6 @@ from src.core.logging import log
 router = APIRouter(tags=["System & Health"])
 
 
-@router.get("/", include_in_schema=False)
 @router.get("/api/health", summary="API health check")
 def health_check():
     """System liveness and readiness probe."""

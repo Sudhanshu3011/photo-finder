@@ -72,12 +72,7 @@ async def test_auth_service_lifecycle(client: AsyncClient):
 @pytest.mark.asyncio
 async def test_photo_upload_service(client: AsyncClient):
     """Test single photo ingestion, validation, and batch upload tracking."""
-    # 1. Categories
-    cat_resp = await client.get("/api/upload/categories")
-    assert cat_resp.status_code == 200
-    assert len(cat_resp.json()["categories"]) >= 3
-
-    # 2. Upload valid single photo
+    # 1. Upload valid single photo
     img_bytes = create_mock_jpeg(150, 150)
     files = {"file": ("portrait.jpg", img_bytes, "image/jpeg")}
     up_resp = await client.post("/api/upload/photo", files=files)
@@ -110,12 +105,12 @@ async def test_photo_upload_service(client: AsyncClient):
 async def test_image_processing_and_clustering(client: AsyncClient):
     """Test AI processing trigger, clustering, and cluster renaming."""
     # 1. Trigger clustering (should succeed even if empty or few faces)
-    cluster_resp = await client.post("/api/process/cluster-faces?min_cluster_size=2")
+    cluster_resp = await client.post("/api/clusters/generate?folder_name=general&min_cluster_size=2")
     assert cluster_resp.status_code == 200
     assert "status" in cluster_resp.json()
 
     # 2. Get clusters list
-    list_resp = await client.get("/api/process/clusters")
+    list_resp = await client.get("/api/clusters")
     assert list_resp.status_code == 200
     assert isinstance(list_resp.json(), list)
 
