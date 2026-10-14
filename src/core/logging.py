@@ -27,6 +27,8 @@ async def close_logging_session():
 def log(level: str, event: str, **kwargs) -> None:
     """Structured event logging."""
     norm_level = level.upper()
+    if norm_level == "WARN":
+        norm_level = "WARNING"
     data_str = " ".join(f"{k}={v}" for k, v in kwargs.items())
     message = f"[{event}] {data_str}" if data_str else f"[{event}]"
     _loguru.log(norm_level, message)

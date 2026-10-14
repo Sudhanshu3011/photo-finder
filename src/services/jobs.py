@@ -260,19 +260,19 @@ async def process_one_file(
     sem,
 ):
     import io
-    from src.modules.storage.cloudinary_storage import upload_to_cloudinary
+    from src.modules.storage.s3_storage import upload_image_to_s3
     file_id = uuid.uuid4().hex
 
     async def _run_ai():
         async with sem:
             return await ai.process_image_bytes_async(file_bytes, detect_faces=detect_faces)
 
-    cld_task = asyncio.to_thread(
-        upload_to_cloudinary, io.BytesIO(file_bytes), folder, keys.get("cloudinary_creds", {})
+    s3_task = asyncio.to_thread(
+        upload_image_to_s3, io.BytesIO(file_bytes), folder=folder, key=file_id
     )
     ai_task = _run_ai()
-    cld_res, vectors = await asyncio.gather(cld_task, ai_task)
-    return file_id, cld_res.get("secure_url", ""), vectors
+    s3_res, vectors = await asyncio.gather(s3_task, ai_task)
+    return file_id, (s3_res or {}).get("secure_url", ""), vectors
 
 
 async def batch_upsert_all(*, results: list, folder: str, vector_store=None) -> dict:

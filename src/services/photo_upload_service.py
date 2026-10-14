@@ -6,6 +6,7 @@ from fastapi import UploadFile
 
 from src.modules.vision.image_quality import assess_image_quality
 from src.modules.storage.local_storage import save_image_bytes, get_image_path
+from src.modules.storage.s3_storage import upload_image_to_s3
 from src.modules.storage.cloudinary_storage import upload_image_to_cloudinary
 from src.modules.infra.postgres_repository import get_repository
 from src.modules.infra.kv_cache import get_kv_cache
@@ -91,23 +92,23 @@ class PhotoUploadService:
         # 2. Local Storage
         local_path = save_image_bytes(contents, f"{image_id}_{filename}")
         
-        # 3. Cloudinary Storage
+        # 3. Cloud Object Storage (AWS S3)
         cloud_url = None
         if save_to_cloud:
-            if image_url and "cloudinary.com" in image_url:
+            if image_url and ("s3.amazonaws.com" in image_url or "s3." in image_url or "cloudinary.com" in image_url):
                 cloud_url = image_url
             else:
                 try:
-                    cloud_res = upload_image_to_cloudinary(
+                    cloud_res = upload_image_to_s3(
                         contents,
                         folder=folder_name,
-                        creds=cloudinary_creds,
-                        public_id=image_id
+                        key=image_id,
+                        tenant_id=tenant_id,
                     )
                     if cloud_res:
                         cloud_url = cloud_res.get("secure_url") or cloud_res.get("url")
                 except Exception as e:
-                    logger.warning("[photo_upload_service.ingest_single_photo] Cloud upload skipped/failed: %s", e)
+                    logger.warning("[photo_upload_service.ingest_single_photo] S3 cloud upload skipped/failed: %s", e)
 
         # 4. Cache Metadata
         meta = {

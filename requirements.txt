@@ -34,9 +34,9 @@ opencv-python-headless==4.10.0.84
 Pillow==11.0.0
 numpy>=1.26.4,<2.0
 
-# ── Vector DB & CDN Storage ──────────────────────────────────────
+# ── Vector DB & Cloud Object Storage ──────────────────────────────
 faiss-cpu>=1.8.0
-cloudinary==1.41.0
+boto3>=1.34.0
 aiohttp==3.11.9
 
 # ── Identity Clustering ──────────────────────────────────────────
