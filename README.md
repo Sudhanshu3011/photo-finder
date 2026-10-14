@@ -32,6 +32,7 @@ Comprehensive architectural blueprints and technical references are maintained i
 | [**05_upload_concurrency_and_jobs.md**](context/05_upload_concurrency_and_jobs.md) | Threading model, asyncio concurrency semaphores, background job queue, parallel Cloudinary/AI execution. |
 | [**06_processing_and_indexing.md**](context/06_processing_and_indexing.md) | Image preprocessing, quality validation, FAISS index structures, dual indexing, metadata sync, Cloudinary URLs. |
 | [**07_production_saas_scale_plan.md**](context/07_production_saas_scale_plan.md) | Enterprise scale roadmap: PostgreSQL RLS multi-tenancy, Triton/TensorRT AI decoupling, FAISS HNSW/IVF-PQ, distributed workers. |
+| [**08_nvidia_triton_aws_deployment_guide.md**](context/08_nvidia_triton_aws_deployment_guide.md) | NVIDIA Triton Inference Server & AWS Guide: GPU vs CPU analysis, AWS instance selection (`g4dn.xlarge`), ONNX/TensorRT export, dynamic batching `config.pbtxt`, async gRPC client. |
 
 ---
 
