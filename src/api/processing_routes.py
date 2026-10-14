@@ -10,7 +10,7 @@ from src.schemas.processing_schemas import (
     ImageProcessResponse,
 )
 from src.services.image_processing_service import ImageProcessingService
-from src.api.dependencies import get_image_processing_service, require_current_user
+from src.api.dependencies import get_image_processing_service, require_current_user, get_current_tenant_id
 from src.services.jobs import get_job_status as fetch_job_status
 
 logger = logging.getLogger("src.api.processing_routes")
@@ -23,13 +23,14 @@ def process_uploaded_image(
     image_id: str,
     service: ImageProcessingService = Depends(get_image_processing_service),
     current_user: dict = Depends(require_current_user),
+    tenant_id: str = Depends(get_current_tenant_id),
 ):
     """
     Trigger AI inference pipeline for an uploaded image.
     Extracts face landmarks, ArcFace embeddings, and scene/object vectors into FAISS.
     """
     user_id = current_user.get("user_id")
-    res = service.process_image_by_id(image_id=image_id, user_id=user_id)
+    res = service.process_image_by_id(image_id=image_id, user_id=user_id, tenant_id=tenant_id)
     if res.get("status") == "failed":
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=res.get("message", "Processing failed"))
 
@@ -50,6 +51,7 @@ async def trigger_face_clustering(
     epsilon: float = Query(0.25, ge=0.01, le=1.0, description="DBSCAN / HDBSCAN cluster distance tolerance"),
     service: ImageProcessingService = Depends(get_image_processing_service),
     current_user: dict = Depends(require_current_user),
+    tenant_id: str = Depends(get_current_tenant_id),
 ):
     """
     Run HDBSCAN clustering over extracted face embeddings to group identities into albums.
@@ -68,6 +70,7 @@ async def trigger_face_clustering(
         epsilon=epsilon,
         folder_name=target_folder,
         user_id=user_id,
+        tenant_id=tenant_id,
     )
     return ClusteringTriggerResponse(
         status=res.get("status", "success"),
@@ -82,10 +85,11 @@ def get_all_clusters(
     folder_name: Optional[str] = Query(None, description="Filter clusters by Cloudinary folder name"),
     service: ImageProcessingService = Depends(get_image_processing_service),
     current_user: dict = Depends(require_current_user),
+    tenant_id: str = Depends(get_current_tenant_id),
 ):
     """List all identified face clusters (people albums), optionally filtered by folder."""
     user_id = current_user.get("user_id")
-    clusters = service.get_clusters(folder=folder_name, user_id=user_id)
+    clusters = service.get_clusters(folder=folder_name, user_id=user_id, tenant_id=tenant_id)
     return [FaceClusterResponse(**c) for c in clusters]
 
 
@@ -95,14 +99,15 @@ def rename_face_cluster(
     req: ClusterRenameRequest,
     service: ImageProcessingService = Depends(get_image_processing_service),
     current_user: dict = Depends(require_current_user),
+    tenant_id: str = Depends(get_current_tenant_id),
 ):
     """Rename a face cluster to assign a person's real name."""
-    success = service.rename_cluster(cluster_id=cluster_id, new_name=req.person_name)
+    success = service.rename_cluster(cluster_id=cluster_id, new_name=req.person_name, tenant_id=tenant_id)
     if not success:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Cluster {cluster_id} not found")
 
     user_id = current_user.get("user_id")
-    clusters = service.get_clusters(user_id=user_id)
+    clusters = service.get_clusters(user_id=user_id, tenant_id=tenant_id)
     matching = [c for c in clusters if c["cluster_id"] == cluster_id]
     if not matching:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Cluster {cluster_id} not found")
@@ -114,9 +119,10 @@ def rename_face_cluster(
 async def get_job_progress(
     job_id: str,
     current_user: dict = Depends(require_current_user),
+    tenant_id: str = Depends(get_current_tenant_id),
 ):
     """Check the status and progress of an asynchronous batch processing job."""
-    job = await fetch_job_status(job_id)
+    job = await fetch_job_status(job_id, tenant_id=tenant_id)
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found")
 

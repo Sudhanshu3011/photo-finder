@@ -42,28 +42,31 @@ class ImageSearchService:
         adaface_vec: Optional[List[float]] = None,
         top_k: int = FACE_SEARCH_TOP_K,
         threshold: float = FACE_MATCH_THRESHOLD,
-        filter_dict: Optional[dict] = None
+        filter_dict: Optional[dict] = None,
+        tenant_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Search faces using raw embedding vectors with score fusion."""
+        """Search faces using raw embedding vectors with score fusion scoped to tenant."""
         has_ada = bool(adaface_vec and len(adaface_vec) == ADAFACE_DIM)
         scope = f"folder='{filter_dict['folder']}'" if (filter_dict and "folder" in filter_dict) else "all gallery folders"
         fusion_info = "Dual-model (ArcFace 512D + AdaFace 512D)" if has_ada else "Single-model (ArcFace 512D)"
-        logger.info("[Face Search] Querying %s | Scope: %s | Max matches: %d | Min similarity threshold: %.2f",
-                    fusion_info, scope, top_k, threshold)
+        logger.info("[Face Search] Querying %s | Scope: %s | Max matches: %d | Min similarity threshold: %.2f | Tenant: %s",
+                    fusion_info, scope, top_k, threshold, tenant_id or "default")
 
         # 1. Search primary ArcFace index
         arc_matches = self.engine.search_vectors(
             index_name=IDX_FACES_ARCFACE if IDX_FACES_ARCFACE in self.engine.indices else IDX_FACES,
             query_vector=arcface_vec,
             top_k=top_k * 2,
-            filter_dict=filter_dict
+            filter_dict=filter_dict,
+            tenant_id=tenant_id,
         )
         if not arc_matches and IDX_FACES in self.engine.indices and IDX_FACES != IDX_FACES_ARCFACE:
             arc_matches = self.engine.search_vectors(
                 index_name=IDX_FACES,
                 query_vector=arcface_vec,
                 top_k=top_k * 2,
-                filter_dict=filter_dict
+                filter_dict=filter_dict,
+                tenant_id=tenant_id,
             )
 
         # 2. Search AdaFace index if vector is provided
@@ -73,7 +76,8 @@ class ImageSearchService:
                 index_name=IDX_FACES_ADAFACE,
                 query_vector=adaface_vec,
                 top_k=top_k * 2,
-                filter_dict=filter_dict
+                filter_dict=filter_dict,
+                tenant_id=tenant_id,
             )
 
         # 3. Fuse scores (0.6 * ArcFace + 0.4 * AdaFace)
@@ -89,18 +93,20 @@ class ImageSearchService:
         object_vec: List[float],
         top_k: int = OBJECT_SEARCH_TOP_K,
         threshold: float = OBJECT_MATCH_THRESHOLD,
-        filter_dict: Optional[dict] = None
+        filter_dict: Optional[dict] = None,
+        tenant_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Search scenes/objects using visual embedding vectors."""
+        """Search scenes/objects using visual embedding vectors scoped to tenant."""
         scope = f"folder='{filter_dict['folder']}'" if (filter_dict and "folder" in filter_dict) else "all gallery folders"
-        logger.info("[Object Search] Querying DINOv2+SigLIP fused vectors | Scope: %s | Max matches: %d | Min similarity threshold: %.2f",
-                    scope, top_k, threshold)
+        logger.info("[Object Search] Querying DINOv2+SigLIP fused vectors | Scope: %s | Max matches: %d | Min similarity threshold: %.2f | Tenant: %s",
+                    scope, top_k, threshold, tenant_id or "default")
         
         matches = self.engine.search_vectors(
             index_name=IDX_OBJECTS,
             query_vector=object_vec,
             top_k=top_k * 2,
-            filter_dict=filter_dict
+            filter_dict=filter_dict,
+            tenant_id=tenant_id,
         )
 
         scored = score_object_matches(
@@ -116,7 +122,8 @@ class ImageSearchService:
         search_objects: bool = True,
         top_k: int = FACE_SEARCH_TOP_K,
         threshold: float = FACE_MATCH_THRESHOLD,
-        filter_dict: Optional[dict] = None
+        filter_dict: Optional[dict] = None,
+        tenant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Multimodal search by query image. Detects faces or extracts object embeddings,
@@ -150,7 +157,8 @@ class ImageSearchService:
                             adaface_vec=ada_vec if has_valid_ada else None,
                             top_k=top_k,
                             threshold=threshold,
-                            filter_dict=filter_dict
+                            filter_dict=filter_dict,
+                            tenant_id=tenant_id,
                         )
                         face_matches_acc.extend(m)
                     else:
@@ -181,7 +189,8 @@ class ImageSearchService:
                     object_vec=obj_vec,
                     top_k=top_k,
                     threshold=threshold,
-                    filter_dict=filter_dict
+                    filter_dict=filter_dict,
+                    tenant_id=tenant_id,
                 )
                 results["results"] = obj_matches
                 results["total_matches"] = len(obj_matches)
@@ -195,11 +204,12 @@ class ImageSearchService:
         angle_embeddings: Dict[str, np.ndarray],
         top_k: int = FACE_SEARCH_TOP_K,
         threshold: float = FACE_MATCH_THRESHOLD,
-        filter_dict: Optional[dict] = None
+        filter_dict: Optional[dict] = None,
+        tenant_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Fuses multi-angle embeddings (e.g. 'front', 'left', 'right')
-        into a composite vector and queries the face store.
+        into a composite vector and queries the face store scoped to tenant.
         """
         fused = fuse_angle_embeddings(angle_embeddings)
         if fused is None:
@@ -210,7 +220,8 @@ class ImageSearchService:
             arcface_vec=[float(x) for x in fused],
             top_k=top_k,
             threshold=threshold,
-            filter_dict=filter_dict
+            filter_dict=filter_dict,
+            tenant_id=tenant_id,
         )
 
 

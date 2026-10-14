@@ -11,7 +11,7 @@ load_dotenv()
 # Credentals / Secrets (set in HF Space secrets) / KEYS / URLS
 # ===============================================================
 
-# Cloudinary CDN credentials (set in HF Space secrets or .env)
+# Cloudinary CDN credentials (legacy fallback)
 DEFAULT_CLOUDINARY_URL = os.getenv("DEFAULT_CLOUDINARY_URL") or os.getenv("CLOUDINARY_URL", "")
 if not DEFAULT_CLOUDINARY_URL:
     _c_name = os.getenv("CLOUDINARY_CLOUD_NAME", "")
@@ -19,6 +19,14 @@ if not DEFAULT_CLOUDINARY_URL:
     _c_sec = os.getenv("CLOUDINARY_API_SECRET", "")
     if _c_name and _c_key and _c_sec:
         DEFAULT_CLOUDINARY_URL = f"cloudinary://{_c_key}:{_c_sec}@{_c_name}"
+
+# AWS S3 Object Storage Configuration
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+AWS_S3_BUCKET = os.getenv("AWS_S3_BUCKET", "visual-search-media")
+AWS_S3_ENDPOINT_URL = os.getenv("AWS_S3_ENDPOINT_URL", "")
+AWS_S3_PUBLIC_URL_PREFIX = os.getenv("AWS_S3_PUBLIC_URL_PREFIX", "")
 
 # FAISS Vector Store local directory
 FAISS_DATA_DIR = os.getenv("FAISS_DATA_DIR", "data/faiss")

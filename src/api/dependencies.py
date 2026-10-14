@@ -58,6 +58,34 @@ def require_current_user(
     return current_user
 
 
+def get_current_tenant_id(
+    request: Request,
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user),
+    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
+) -> str:
+    """
+    Extract and enforce tenant context.
+    Priority:
+    1. Authenticated user's tenant_id (cryptographically signed in JWT)
+    2. Explicit X-Tenant-ID header (for API keys or service-to-service)
+    3. request.state.tenant_id if set by middleware
+    4. Default fallback: 'default'
+    """
+    from src.core.tenant_context import set_current_tenant_id
+
+    tenant_id = "default"
+    if current_user and current_user.get("tenant_id"):
+        tenant_id = str(current_user["tenant_id"]).strip()
+    elif x_tenant_id and x_tenant_id.strip():
+        tenant_id = x_tenant_id.strip()
+    elif hasattr(request.state, "tenant_id") and request.state.tenant_id:
+        tenant_id = str(request.state.tenant_id).strip()
+
+    request.state.tenant_id = tenant_id
+    set_current_tenant_id(tenant_id)
+    return tenant_id
+
+
 def get_image_processing_service(
     request: Request,
     ai=Depends(get_ai_manager),

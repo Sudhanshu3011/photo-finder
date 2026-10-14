@@ -1,7 +1,7 @@
 import logging
 import uuid
 from typing import Optional, Dict, Any
-from src.modules.infra.sqlite_repository import get_repository
+from src.modules.infra.postgres_repository import get_repository
 from src.modules.auth.password_hasher import hash_password, verify_password
 from src.modules.auth.jwt_manager import create_access_token, decode_access_token
 
@@ -13,9 +13,17 @@ class UserAuthService:
     def __init__(self, repo=None):
         self.repo = repo or get_repository()
 
-    def register(self, username: str, email: str, password: str, role: str = "user", cloudinary_url: Optional[str] = None) -> Dict[str, Any]:
+    def register(
+        self,
+        username: str,
+        email: str,
+        password: str,
+        role: str = "user",
+        cloudinary_url: Optional[str] = None,
+        tenant_id: str = "default",
+    ) -> Dict[str, Any]:
         """Register a new user after verifying uniqueness."""
-        logger.info("[user_auth_service.register] Attempting registration for username=%s, email=%s", username, email)
+        logger.info("[user_auth_service.register] Attempting registration for username=%s, email=%s, tenant_id=%s", username, email, tenant_id)
         
         # Check existing username
         if self.repo.get_user_by_username(username):
@@ -36,7 +44,8 @@ class UserAuthService:
             email=email,
             hashed_password=hashed_pw,
             role=role,
-            cloudinary_url=cloudinary_url
+            cloudinary_url=cloudinary_url,
+            tenant_id=tenant_id or "default",
         )
         if not created:
             logger.error("[user_auth_service.register] Failed to save user to database")
@@ -66,14 +75,16 @@ class UserAuthService:
         return user
 
     def issue_token(self, user: Dict[str, Any]) -> str:
-        """Issue a JWT access token for the given user."""
+        """Issue a JWT access token for the given user with tenant_id claim."""
+        tid = user.get("tenant_id") or "default"
         token_data = {
             "sub": user["user_id"],
             "username": user["username"],
-            "role": user.get("role", "user")
+            "role": user.get("role", "user"),
+            "tenant_id": tid,
         }
-        token = create_access_token(data=token_data)
-        logger.info("[user_auth_service.issue_token] Issued token for user_id=%s", user["user_id"])
+        token = create_access_token(data=token_data, tenant_id=tid)
+        logger.info("[user_auth_service.issue_token] Issued token for user_id=%s, tenant_id=%s", user["user_id"], tid)
         return token
 
     def verify_token(self, token: str) -> Optional[Dict[str, Any]]:
@@ -84,6 +95,8 @@ class UserAuthService:
             return None
         
         user = self.repo.get_user_by_id(payload["sub"])
+        if user and not user.get("tenant_id"):
+            user["tenant_id"] = payload.get("tenant_id", "default")
         return user
 
     def get_profile(self, user_id: str) -> Optional[Dict[str, Any]]:

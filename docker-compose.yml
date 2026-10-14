@@ -10,11 +10,57 @@ services:
       - "7860:7860"
     env_file:
       - .env
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/visual_search
+      - REDIS_URL=redis://redis:6379/0
+      - FAISS_DATA_DIR=data/faiss
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     volumes:
       # Mount code live: editing code on your computer reloads immediately inside container!
       - ./src:/app/src
       - ./main.py:/app/main.py
-      # Keep uploaded files persistent outside container
+      # Keep uploaded files and indices persistent outside container
+      - ./data:/app/data
       - ./saved_images:/app/saved_images
       - ./temp_uploads:/app/temp_uploads
     restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: visual_search_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: visual_search
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d visual_search"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: visual_search_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+  redisdata:

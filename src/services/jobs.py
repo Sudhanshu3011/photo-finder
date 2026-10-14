@@ -1,6 +1,6 @@
 """
-src/services/jobs.py — Asynchronous upload background job queue backed by local SQLite.
-Zero Supabase/Redis dependencies: manages job creation, status polling, real-time logging, and background worker execution.
+src/services/jobs.py — Asynchronous upload background job queue backed by PostgreSQL & Redis.
+Manages job creation, status polling, real-time logging, and background worker execution.
 Decouples fast image ingestion from heavy deep learning AI inference and FAISS indexing.
 """
 import asyncio
@@ -13,8 +13,9 @@ from typing import Any, Optional
 
 from src.core.config import USE_ASYNC_UPLOADS, CLUSTER_AUTO_TRIGGER_EVERY
 from src.core.logging import log, warn
+from src.core.tenant_context import get_current_tenant_id
 from src.modules.infra.kv_cache import cache
-from src.modules.infra.sqlite_repository import (
+from src.modules.infra.postgres_repository import (
     db_create_job,
     db_get_job,
     db_update_job,
@@ -32,25 +33,30 @@ async def create_job(
     user_id: str,
     folder: str,
     total_files: int,
-    job_payload: dict,
+    job_payload: Optional[dict] = None,
     job_id: Optional[str] = None,
+    tenant_id: Optional[str] = None,
 ) -> str:
     jid = job_id or str(uuid.uuid4())
+    tid = (tenant_id or get_current_tenant_id()).strip()
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
-    initial_log = f"[{ts}] Job queued: {total_files} images scheduled for folder '{folder}'"
+    initial_log = f"[{ts}] Job queued: {total_files} images scheduled for folder '{folder}' (tenant: '{tid}')"
+    payload_dict = job_payload or {}
 
-    # Persist in local SQLite database
+    # Persist in database
     await db_create_job(
         job_id=jid,
         user_id=user_id or "anonymous",
         folder=folder,
         total_files=total_files,
-        payload=job_payload,
+        payload=payload_dict,
+        tenant_id=tid,
     )
 
-    # Cache fast-path lookup
+    # Cache fast-path lookup in Redis / KV Cache
     job_data = {
         "job_id": jid,
+        "tenant_id": tid,
         "user_id": user_id or "anonymous",
         "folder": folder,
         "status": "pending",
@@ -58,15 +64,18 @@ async def create_job(
         "total_files": total_files,
         "processed_files": 0,
         "logs": [initial_log],
-        "payload": job_payload,
+        "payload": payload_dict,
     }
+    await cache.set_json(f"job:{tid}:{jid}", job_data, ttl=JOB_TTL)
     await cache.set_json(f"job:{jid}", job_data, ttl=JOB_TTL)
+    await cache.lpush(f"{QUEUE_KEY}:{tid}", jid)
     await cache.lpush(QUEUE_KEY, jid)
 
     log(
         "INFO",
         "job.created",
         job_id=jid,
+        tenant_id=tid,
         user_id=user_id or "anonymous",
         folder=folder,
         total_files=total_files,
@@ -74,31 +83,43 @@ async def create_job(
     return jid
 
 
-async def append_job_log(job_id: str, message: str, stage: str = "") -> None:
+async def append_job_log(job_id: str, message: str, stage: str = "", tenant_id: Optional[str] = None) -> None:
     """Appends an execution log message to both local DB and memory cache."""
     await db_append_job_log(job_id, message)
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
     entry = f"[{ts}] {message}"
 
-    cached = await cache.get_json(f"job:{job_id}") or {}
+    tid = (tenant_id or get_current_tenant_id()).strip()
+    cached = await cache.get_json(f"job:{tid}:{job_id}") or await cache.get_json(f"job:{job_id}") or {}
     logs = cached.get("logs", [])
     logs.append(entry)
     cached["logs"] = logs
     if stage:
         cached["current_stage"] = stage
+    await cache.set_json(f"job:{tid}:{job_id}", cached, ttl=JOB_TTL)
     await cache.set_json(f"job:{job_id}", cached, ttl=JOB_TTL)
 
 
-async def get_job_status(job_id: str) -> Optional[dict]:
+async def get_job_status(job_id: str, tenant_id: Optional[str] = None) -> Optional[dict]:
+    """Retrieve job status, enforcing tenant isolation to prevent IDOR."""
+    tid = (tenant_id or get_current_tenant_id()).strip()
+
     # Check cache fast-path first
-    cached = await cache.get_json(f"job:{job_id}")
+    cached = await cache.get_json(f"job:{tid}:{job_id}") or await cache.get_json(f"job:{job_id}")
     if cached:
+        # Verify tenant ownership if requested
+        cached_tid = cached.get("tenant_id", "default")
+        if tid != "default" and cached_tid != "default" and cached_tid != tid:
+            return None  # IDOR prevention: Job belongs to another tenant
         cached.pop("payload", None)
         return cached
 
-    # Fallback to local SQLite database
+    # Fallback to database
     job = await db_get_job(job_id)
     if job:
+        job_tid = job.get("tenant_id", "default")
+        if tid != "default" and job_tid != "default" and job_tid != tid:
+            return None  # IDOR prevention
         job.pop("payload", None)
     return job
 
@@ -106,28 +127,32 @@ async def get_job_status(job_id: str) -> Optional[dict]:
 async def update_job_progress(
     job_id: str,
     processed: int,
-    total: int,
+    total: int = 0,
     stage: str = "processing",
     log_msg: Optional[str] = None,
+    tenant_id: Optional[str] = None,
 ) -> None:
+    tid = (tenant_id or get_current_tenant_id()).strip()
     patch = {
         "status": "processing",
         "processed_files": processed,
     }
     await db_update_job(job_id, patch)
 
-    cached = await cache.get_json(f"job:{job_id}") or {}
+    cached = await cache.get_json(f"job:{tid}:{job_id}") or await cache.get_json(f"job:{job_id}") or {}
     cached.update(patch)
     cached["current_stage"] = stage
+    await cache.set_json(f"job:{tid}:{job_id}", cached, ttl=JOB_TTL)
     await cache.set_json(f"job:{job_id}", cached, ttl=JOB_TTL)
 
     if log_msg:
-        await append_job_log(job_id, log_msg, stage=stage)
+        await append_job_log(job_id, log_msg, stage=stage, tenant_id=tid)
 
     log(
         "INFO",
         "job.progress",
         job_id=job_id,
+        tenant_id=tid,
         processed=processed,
         total=total,
         stage=stage,
@@ -235,19 +260,19 @@ async def process_one_file(
     sem,
 ):
     import io
-    from src.modules.storage.cloudinary_storage import upload_to_cloudinary
+    from src.modules.storage.s3_storage import upload_image_to_s3
     file_id = uuid.uuid4().hex
 
     async def _run_ai():
         async with sem:
             return await ai.process_image_bytes_async(file_bytes, detect_faces=detect_faces)
 
-    cld_task = asyncio.to_thread(
-        upload_to_cloudinary, io.BytesIO(file_bytes), folder, keys.get("cloudinary_creds", {})
+    s3_task = asyncio.to_thread(
+        upload_image_to_s3, io.BytesIO(file_bytes), folder=folder, key=file_id
     )
     ai_task = _run_ai()
-    cld_res, vectors = await asyncio.gather(cld_task, ai_task)
-    return file_id, cld_res.get("secure_url", ""), vectors
+    s3_res, vectors = await asyncio.gather(s3_task, ai_task)
+    return file_id, (s3_res or {}).get("secure_url", ""), vectors
 
 
 async def batch_upsert_all(*, results: list, folder: str, vector_store=None) -> dict:

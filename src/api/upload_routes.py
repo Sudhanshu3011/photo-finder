@@ -9,7 +9,7 @@ from src.schemas.upload_schemas import (
     FolderSyncResponse,
 )
 from src.services.photo_upload_service import PhotoUploadService, get_upload_service
-from src.api.dependencies import require_current_user
+from src.api.dependencies import require_current_user, get_current_tenant_id
 from src.common.utils import get_cloudinary_creds
 from src.modules.infra.kv_cache import get_kv_cache
 from src.core.config import DEFAULT_CLOUDINARY_URL
@@ -47,6 +47,7 @@ async def upload_single_photo(
     cloudinary_url: Optional[str] = Form(None, description="Optional Cloudinary connection URL override"),
     service: PhotoUploadService = Depends(get_upload_service),
     current_user: dict = Depends(require_current_user),
+    tenant_id: str = Depends(get_current_tenant_id),
 ):
     """
     Ingest, validate, and store a single image file or Cloudinary URL into a target folder.
@@ -68,6 +69,7 @@ async def upload_single_photo(
         folder_name=folder_name,
         user_id=user_id,
         cloudinary_creds=creds,
+        tenant_id=tenant_id,
     )
     if res.get("status") == "failed":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=res.get("message", "Upload failed"))
@@ -85,6 +87,7 @@ async def upload_batch_photos(
     cloudinary_url: Optional[str] = Form(None, description="Optional Cloudinary connection URL override"),
     service: PhotoUploadService = Depends(get_upload_service),
     current_user: dict = Depends(require_current_user),
+    tenant_id: str = Depends(get_current_tenant_id),
 ):
     """
     Upload and ingest multiple images into a specific Cloudinary folder in a single request.
@@ -108,6 +111,7 @@ async def upload_batch_photos(
         folder_name=folder_name,
         user_id=user_id,
         cloudinary_creds=creds,
+        tenant_id=tenant_id,
     )
 
     return BatchUploadResponse(
