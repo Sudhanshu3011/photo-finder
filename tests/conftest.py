@@ -4,7 +4,6 @@ Provides isolated mock environments and async HTTP test client.
 """
 import os
 os.environ["TESTING"] = "true"
-os.environ["SQLITE_DB_PATH"] = "/tmp/test_local_storage.db"
 os.environ["FAISS_DATA_DIR"] = "/tmp/test_faiss_data"
 from typing import AsyncGenerator
 import pytest
@@ -40,6 +39,7 @@ async def mock_get_verified_keys():
 
 from fastapi import Request, HTTPException, status
 from src.services.user_auth_service import get_auth_service
+from src.api.dependencies import get_current_user
 
 
 def mock_require_current_user(request: Request):
@@ -53,6 +53,7 @@ def mock_require_current_user(request: Request):
         if token in ("mock_test_token", "mock_token"):
             return {
                 "user_id": "test_user_id",
+                "tenant_id": request.headers.get("X-Tenant-ID", "test_tenant"),
                 "username": "testuser",
                 "email": "testuser@example.com",
                 "role": "admin",
@@ -67,6 +68,7 @@ def mock_require_current_user(request: Request):
         )
     return {
         "user_id": "test_user_id",
+        "tenant_id": request.headers.get("X-Tenant-ID", "test_tenant"),
         "username": "testuser",
         "email": "testuser@example.com",
         "role": "admin",
@@ -100,6 +102,7 @@ def mock_app():
     app.dependency_overrides[get_upload_service] = mock_get_upload_service
     app.dependency_overrides[get_search_service] = mock_get_search_service
     app.dependency_overrides[require_current_user] = mock_require_current_user
+    app.dependency_overrides[get_current_user] = mock_require_current_user
     yield app
     app.dependency_overrides.clear()
 

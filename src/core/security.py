@@ -2,14 +2,14 @@
 src/core/security.py — Industry-standard API credential resolution and User ID tracking.
 Extracts credentials from Headers, Form data, or environment defaults without polluting GET request bodies.
 Eliminates Pinecone key requirements in favor of local FAISS vector storage.
-Maintains persistent user UUIDs in the local SQLite database.
+Maintains persistent user UUIDs in the PostgreSQL database.
 """
 from typing import Optional
 from fastapi import Header, HTTPException, Request
 
 from src.core.config import DEFAULT_CLOUDINARY_URL
 from src.common.utils import get_cloudinary_creds
-from src.modules.infra.sqlite_repository import get_or_create_anonymous_user as get_or_create_user
+from src.modules.infra.postgres_repository import get_or_create_anonymous_user as get_or_create_user
 
 
 async def get_verified_keys(
@@ -82,7 +82,7 @@ async def get_user_id(
     x_user_id: Optional[str] = Header(None, alias="X-User-ID"),
 ) -> str:
     """
-    Resolves, tracks, and persists user UUID in the local SQLite database.
+    Resolves, tracks, and persists user UUID in PostgreSQL database.
     Checks X-User-ID header, query param, or form body. Generates and persists a new UUID if missing.
     """
     uid = (x_user_id or "").strip()
@@ -99,6 +99,6 @@ async def get_user_id(
     if not uid:
         uid = request.query_params.get("user_id", "").strip()
 
-    # Automatically persist and resolve UUID in local SQLite
+    # Automatically persist and resolve UUID in PostgreSQL
     resolved_uid = await get_or_create_user(uid)
     return resolved_uid

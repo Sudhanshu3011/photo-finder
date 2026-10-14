@@ -1,7 +1,7 @@
 """
 src/modules/infra/faiss_engine.py — Production-grade local FAISS Vector Storage Engine.
 Provides sub-millisecond cosine similarity search over normalized embeddings.
-Persistent to disk (data/faiss/*.index) with metadata synced to SQLite.
+Persistent to disk (data/faiss/*.index) with metadata synced to PostgreSQL.
 """
 import json
 import os
@@ -21,7 +21,8 @@ from src.core.config import (
     OBJECT_DIM,
 )
 from src.core.logging import log, warn
-from src.modules.infra.sqlite_repository import (
+from src.core.tenant_context import get_current_tenant_id
+from src.modules.infra.postgres_repository import (
     sync_save_vector_metadata_batch,
     sync_get_vector_metadata_by_int_ids,
     sync_delete_vectors_by_ids,
@@ -45,6 +46,7 @@ class NumpyVectorIndex:
 
     def __init__(self, dimension: int):
         self.dimension = dimension
+        self.d = dimension
         self.vectors: Dict[int, np.ndarray] = {}  # int_id -> normalized vector
         self.lock = threading.RLock()
 
@@ -89,7 +91,7 @@ class NumpyVectorIndex:
 
 
 class FAISSEngine:
-    """Local vector store orchestrating indices across face and object domains."""
+    """Local vector store orchestrating indices across face and object domains with tenant partitioning."""
 
     DIMENSIONS = {
         IDX_FACES: FACE_DIM,
@@ -102,73 +104,99 @@ class FAISSEngine:
         env_dir = os.environ.get("FAISS_DATA_DIR")
         self.data_dir = env_dir if env_dir else os.path.join(os.getcwd(), data_dir)
         os.makedirs(self.data_dir, exist_ok=True)
-        self.indices: Dict[str, Any] = {}
+        # Partitioned index storage keyed by (tenant_id, index_name)
+        self.indices: Dict[Tuple[str, str], Any] = {}
         self.lock = threading.RLock()
-        self._init_indices()
+        self._init_indices("default")
 
-    def _get_index_path(self, index_name: str) -> str:
-        return os.path.join(self.data_dir, f"{index_name}.index")
+    def _get_index_path(self, index_name: str, tenant_id: str = "default") -> str:
+        tid = (tenant_id or "default").strip()
+        tenant_dir = os.path.join(self.data_dir, tid)
+        os.makedirs(tenant_dir, exist_ok=True)
+        return os.path.join(tenant_dir, f"{index_name}.index")
 
-    def _init_indices(self):
+    def _init_indices(self, tenant_id: str = "default"):
+        tid = (tenant_id or "default").strip()
         with self.lock:
             for idx_name, dim in self.DIMENSIONS.items():
-                path = self._get_index_path(idx_name)
+                key = (tid, idx_name)
+                path = self._get_index_path(idx_name, tid)
+                legacy_path = os.path.join(self.data_dir, f"{idx_name}.index")
+                if not os.path.exists(path) and os.path.exists(legacy_path) and tid == "default":
+                    path = legacy_path
+
                 if HAS_FAISS:
                     if os.path.exists(path):
                         try:
                             loaded = faiss.read_index(path)
                             if loaded.d != dim:
-                                warn(f"Index dimension mismatch for {idx_name}: expected {dim}, found {loaded.d}. Recreating index.")
+                                warn(f"Index dimension mismatch for {idx_name} (tenant {tid}): expected {dim}, found {loaded.d}. Recreating index.")
                                 raw = faiss.IndexFlatIP(dim)
-                                self.indices[idx_name] = faiss.IndexIDMap2(raw)
+                                self.indices[key] = faiss.IndexIDMap2(raw)
                             else:
-                                self.indices[idx_name] = loaded
+                                self.indices[key] = loaded
                         except Exception as e:
                             warn(f"Failed to load FAISS index from {path}: {e}. Creating new.")
                             raw = faiss.IndexFlatIP(dim)
-                            self.indices[idx_name] = faiss.IndexIDMap2(raw)
+                            self.indices[key] = faiss.IndexIDMap2(raw)
                     else:
                         raw = faiss.IndexFlatIP(dim)
-                        self.indices[idx_name] = faiss.IndexIDMap2(raw)
+                        self.indices[key] = faiss.IndexIDMap2(raw)
                 else:
-                    self.indices[idx_name] = NumpyVectorIndex(dim)
+                    self.indices[key] = NumpyVectorIndex(dim)
 
-
-    def get_index(self, index_name: str, dim: Optional[int] = None):
+    def get_index(self, index_name: str, tenant_id: Optional[str] = None, dim: Optional[int] = None):
+        tid = (tenant_id or get_current_tenant_id()).strip()
+        key = (tid, index_name)
         with self.lock:
-            if index_name not in self.indices:
+            if key not in self.indices:
                 d = dim or self.DIMENSIONS.get(index_name, 512)
-                if HAS_FAISS:
-                    raw = faiss.IndexFlatIP(d)
-                    self.indices[index_name] = faiss.IndexIDMap2(raw)
-                else:
-                    self.indices[index_name] = NumpyVectorIndex(d)
-            return self.indices[index_name]
+                path = self._get_index_path(index_name, tid)
+                legacy_path = os.path.join(self.data_dir, f"{index_name}.index")
+                if not os.path.exists(path) and os.path.exists(legacy_path) and tid == "default":
+                    path = legacy_path
 
-    def save_to_disk(self, index_name: Optional[str] = None):
-        """Persist native FAISS indexes to disk."""
+                if HAS_FAISS:
+                    if os.path.exists(path):
+                        try:
+                            self.indices[key] = faiss.read_index(path)
+                        except Exception:
+                            raw = faiss.IndexFlatIP(d)
+                            self.indices[key] = faiss.IndexIDMap2(raw)
+                    else:
+                        raw = faiss.IndexFlatIP(d)
+                        self.indices[key] = faiss.IndexIDMap2(raw)
+                else:
+                    self.indices[key] = NumpyVectorIndex(d)
+            return self.indices[key]
+
+    def save_to_disk(self, index_name: Optional[str] = None, tenant_id: Optional[str] = None):
+        """Persist native FAISS indexes to disk scoped to tenant."""
         if not HAS_FAISS:
             return
+        target_tid = (tenant_id or get_current_tenant_id()).strip() if tenant_id else None
         with self.lock:
-            targets = [index_name] if index_name else list(self.indices.keys())
-            for name in targets:
-                idx = self.indices.get(name)
-                if idx is not None:
-                    path = self._get_index_path(name)
-                    try:
-                        faiss.write_index(idx, path)
-                    except Exception as e:
-                        warn(f"Failed to persist FAISS index {name}: {e}")
+            targets = list(self.indices.keys())
+            for (tid, name) in targets:
+                if (index_name is None or name == index_name) and (target_tid is None or tid == target_tid):
+                    idx = self.indices.get((tid, name))
+                    if idx is not None:
+                        path = self._get_index_path(name, tid)
+                        try:
+                            faiss.write_index(idx, path)
+                        except Exception as e:
+                            warn(f"Failed to persist FAISS index {name} for tenant {tid}: {e}")
 
-    def upsert(self, index_name: str, records: List[dict]) -> int:
+    def upsert(self, index_name: str, records: List[dict], tenant_id: Optional[str] = None) -> int:
         """
-        Upsert a batch of vectors with metadata.
+        Upsert a batch of vectors with metadata scoped to tenant.
         Each record: {"id": str, "vector"|"values": list[float], "url": str, "folder": str, "metadata": dict}
         """
         if not records:
             return 0
 
-        int_ids = sync_save_vector_metadata_batch(index_name, records)
+        tid = (tenant_id or get_current_tenant_id()).strip()
+        int_ids = sync_save_vector_metadata_batch(index_name, records, tenant_id=tid)
         vec_list = [r.get("vector") if "vector" in r else r.get("values") for r in records]
         vecs = np.array(vec_list, dtype=np.float32)
 
@@ -179,14 +207,15 @@ class FAISSEngine:
 
         target_dim = vecs.shape[1]
         with self.lock:
-            idx = self.get_index(index_name, dim=target_dim)
+            idx = self.get_index(index_name, tenant_id=tid, dim=target_dim)
+            key = (tid, index_name)
             if idx.ntotal == 0 and idx.d != target_dim:
                 if HAS_FAISS:
                     raw = faiss.IndexFlatIP(target_dim)
-                    self.indices[index_name] = faiss.IndexIDMap2(raw)
+                    self.indices[key] = faiss.IndexIDMap2(raw)
                 else:
-                    self.indices[index_name] = NumpyVectorIndex(target_dim)
-                idx = self.indices[index_name]
+                    self.indices[key] = NumpyVectorIndex(target_dim)
+                idx = self.indices[key]
 
             id_array = np.array(int_ids, dtype=np.int64)
             if HAS_FAISS:
@@ -195,8 +224,7 @@ class FAISSEngine:
             else:
                 idx.add_with_ids(vecs, id_array)
 
-
-        self.save_to_disk(index_name)
+        self.save_to_disk(index_name, tenant_id=tid)
         return len(records)
 
     def upsert_vectors(
@@ -206,6 +234,7 @@ class FAISSEngine:
         vectors: Optional[List] = None,
         ids: Optional[List] = None,
         metadata: Optional[List] = None,
+        tenant_id: Optional[str] = None,
     ) -> int:
         """Convenience method accepting either a list of records or explicit vector arrays."""
         if records is None:
@@ -220,22 +249,24 @@ class FAISSEngine:
                         "folder": m.get("folder", ""),
                         "metadata": m,
                     })
-        return self.upsert(index_name, records)
+        return self.upsert(index_name, records, tenant_id=tenant_id)
 
-    def delete_by_ids(self, index_name: str, vector_ids: List[str]) -> int:
-        """Delete vectors by vector_ids from an index."""
-        affected = sync_delete_vectors_by_ids(index_name, vector_ids)
-        if not affected or index_name not in self.indices:
+    def delete_by_ids(self, index_name: str, vector_ids: List[str], tenant_id: Optional[str] = None) -> int:
+        """Delete vectors by vector_ids from an index scoped to tenant."""
+        tid = (tenant_id or get_current_tenant_id()).strip()
+        affected = sync_delete_vectors_by_ids(index_name, vector_ids, tenant_id=tid)
+        key = (tid, index_name)
+        if not affected or key not in self.indices:
             return 0
         with self.lock:
-            idx = self.indices[index_name]
+            idx = self.indices[key]
             arr = np.array(affected, dtype=np.int64)
             removed = idx.remove_ids(arr)
-            self.save_to_disk(index_name)
+            self.save_to_disk(index_name, tenant_id=tid)
         return removed
 
-    def delete_by_id(self, index_name: str, vector_ids: List[str]) -> int:
-        return self.delete_by_ids(index_name, vector_ids)
+    def delete_by_id(self, index_name: str, vector_ids: List[str], tenant_id: Optional[str] = None) -> int:
+        return self.delete_by_ids(index_name, vector_ids, tenant_id=tenant_id)
 
     def search(
         self,
@@ -243,21 +274,23 @@ class FAISSEngine:
         query_vector: List[float],
         top_k: int = 20,
         filter_dict: Optional[dict] = None,
+        tenant_id: Optional[str] = None,
     ) -> List[dict]:
         """
-        Run similarity search against an index.
+        Run similarity search against an index scoped to tenant.
         Returns [{"id": str, "score": float, "url": str, "folder": str, "metadata": dict}, ...]
         """
         if not query_vector:
             return []
 
+        tid = (tenant_id or get_current_tenant_id()).strip()
         q_vec = np.array([query_vector], dtype=np.float32)
         norm = np.linalg.norm(q_vec)
         if norm > 0:
             q_vec = q_vec / norm
 
         target_dim = q_vec.shape[1]
-        idx = self.get_index(index_name, dim=target_dim)
+        idx = self.get_index(index_name, tenant_id=tid, dim=target_dim)
         fetch_k = top_k * 3 if filter_dict else top_k
 
         with self.lock:
@@ -270,7 +303,7 @@ class FAISSEngine:
             return []
 
         matched_int_ids = [int(i) for i in int_ids[0] if i >= 0]
-        meta_lookup = sync_get_vector_metadata_by_int_ids(index_name, matched_int_ids)
+        meta_lookup = sync_get_vector_metadata_by_int_ids(index_name, matched_int_ids, tenant_id=tid)
 
         results = []
         for score, int_id in zip(scores[0], int_ids[0]):
@@ -308,61 +341,70 @@ class FAISSEngine:
         query_vector: List[float],
         top_k: int = 20,
         filter_dict: Optional[dict] = None,
+        tenant_id: Optional[str] = None,
     ) -> List[dict]:
-        return self.search(index_name, query_vector, top_k, filter_dict)
+        return self.search(index_name, query_vector, top_k, filter_dict, tenant_id=tenant_id)
 
-    def delete_by_url(self, url: str) -> int:
-        """Delete all vectors matching a specific image URL across all indexes."""
-        affected = sync_delete_vectors_by_url(url)
+    def delete_by_url(self, url: str, tenant_id: Optional[str] = None) -> int:
+        """Delete all vectors matching a specific image URL across all indexes scoped to tenant."""
+        tid = (tenant_id or get_current_tenant_id()).strip()
+        affected = sync_delete_vectors_by_url(url, tenant_id=tid)
         total_removed = 0
 
         with self.lock:
             for idx_name, int_ids in affected.items():
-                if int_ids and idx_name in self.indices:
-                    idx = self.indices[idx_name]
+                key = (tid, idx_name)
+                if int_ids and key in self.indices:
+                    idx = self.indices[key]
                     arr = np.array(int_ids, dtype=np.int64)
                     idx.remove_ids(arr)
                     total_removed += len(int_ids)
-                    self.save_to_disk(idx_name)
+                    self.save_to_disk(idx_name, tenant_id=tid)
 
         return total_removed
 
-    def delete_by_folder(self, folder: str) -> int:
-        """Delete all vectors for a given folder across all indexes."""
-        affected = sync_delete_vectors_by_folder(folder)
+    def delete_by_folder(self, folder: str, tenant_id: Optional[str] = None) -> int:
+        """Delete all vectors for a given folder across all indexes scoped to tenant."""
+        tid = (tenant_id or get_current_tenant_id()).strip()
+        affected = sync_delete_vectors_by_folder(folder, tenant_id=tid)
         total_removed = 0
 
         with self.lock:
             for idx_name, int_ids in affected.items():
-                if int_ids and idx_name in self.indices:
-                    idx = self.indices[idx_name]
+                key = (tid, idx_name)
+                if int_ids and key in self.indices:
+                    idx = self.indices[key]
                     arr = np.array(int_ids, dtype=np.int64)
                     idx.remove_ids(arr)
                     total_removed += len(int_ids)
-                    self.save_to_disk(idx_name)
+                    self.save_to_disk(idx_name, tenant_id=tid)
 
         return total_removed
 
-    def reset_all(self):
-        """Wipe all vector stores and metadata."""
+    def reset_all(self, tenant_id: Optional[str] = None):
+        """Wipe all vector stores and metadata scoped to tenant."""
+        tid = (tenant_id or get_current_tenant_id()).strip()
         with self.lock:
-            sync_clear_vector_metadata()
-            self._init_indices()
-            for name in list(self.DIMENSIONS.keys()):
-                path = self._get_index_path(name)
-                if os.path.exists(path):
-                    try:
-                        os.remove(path)
-                    except Exception:
-                        pass
+            sync_clear_vector_metadata(tenant_id=tid)
+            keys_to_remove = [k for k in self.indices.keys() if k[0] == tid]
+            for k in keys_to_remove:
+                self.indices.pop(k, None)
+            tenant_dir = os.path.join(self.data_dir, tid)
+            if os.path.exists(tenant_dir):
+                import shutil
+                shutil.rmtree(tenant_dir, ignore_errors=True)
+            self._init_indices(tid)
 
-    def get_all_records(self, index_name: str, limit: int = 10000) -> List[dict]:
-        """Retrieve all vector metadata records for an index."""
-        return sync_get_all_vector_metadata(index_name, limit=limit)
+    def get_all_records(self, index_name: str, limit: int = 10000, tenant_id: Optional[str] = None) -> List[dict]:
+        """Retrieve all vector metadata records for an index scoped to tenant."""
+        tid = (tenant_id or get_current_tenant_id()).strip()
+        return sync_get_all_vector_metadata(index_name, limit=limit, tenant_id=tid)
 
-    def reconstruct_vector(self, index_name: str, int_id: int) -> Optional[np.ndarray]:
-        """Reconstruct vector by integer id from the index."""
-        idx = self.indices.get(index_name)
+    def reconstruct_vector(self, index_name: str, int_id: int, tenant_id: Optional[str] = None) -> Optional[np.ndarray]:
+        """Reconstruct vector by integer id from the index scoped to tenant."""
+        tid = (tenant_id or get_current_tenant_id()).strip()
+        key = (tid, index_name)
+        idx = self.indices.get(key)
         if idx is None:
             return None
         if hasattr(idx, "vectors") and int(int_id) in idx.vectors:

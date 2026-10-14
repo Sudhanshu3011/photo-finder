@@ -12,6 +12,7 @@ class RegisterRequest(BaseModel):
     password: str = Field(..., min_length=6, description="Password (at least 6 characters)", examples=["secret123"])
     role: Optional[str] = Field("user", description="User role ('user' or 'admin')", examples=["user"])
     cloudinary_url: Optional[str] = Field(None, description="Optional Cloudinary connection string (cloudinary://api_key:api_secret@cloud_name)")
+    tenant_id: Optional[str] = Field("default", description="Organization / Tenant ID for multi-tenant isolation", examples=["org_corporate"])
 
 class LoginRequest(BaseModel):
     username: str = Field(..., description="Username or email", examples=["johndoe"])
@@ -24,12 +25,14 @@ class TokenResponse(BaseModel):
     user_id: str
     username: str
     role: str
+    tenant_id: str = "default"
 
 class UserProfileResponse(BaseModel):
     user_id: str
     username: str
     email: str
     role: str
+    tenant_id: str = "default"
     cloudinary_url: Optional[str] = None
     created_at: str
 

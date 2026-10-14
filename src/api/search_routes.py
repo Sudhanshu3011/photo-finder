@@ -6,10 +6,10 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Upload
 
 from src.schemas.search_schemas import SearchResponse, MatchItem
 from src.services.image_search_service import ImageSearchService
-from src.api.dependencies import get_image_search_service, require_current_user
+from src.api.dependencies import get_image_search_service, require_current_user, get_current_tenant_id
 from src.modules.vision.face_detector import detect_faces
 from src.modules.vision.face_embedder import extract_face_embeddings
-from src.modules.infra.sqlite_repository import sync_get_folder_image_count, sync_list_all_indexed_folders
+from src.modules.infra.postgres_repository import sync_get_folder_image_count, sync_list_all_indexed_folders
 from src.common.utils import fetch_image_bytes_from_url
 
 logger = logging.getLogger("src.api.search_routes")
@@ -27,6 +27,7 @@ async def search_by_image(
     threshold: float = Query(0.60, ge=0.0, le=1.0, description="Cosine similarity threshold"),
     service: ImageSearchService = Depends(get_image_search_service),
     current_user: dict = Depends(require_current_user),
+    tenant_id: str = Depends(get_current_tenant_id),
 ):
     """
     Search gallery using an input query image file or direct Cloudinary URL.
@@ -61,25 +62,26 @@ async def search_by_image(
 
     # Validate target folder availability if scoping is requested
     if target_folder:
-        folder_count = sync_get_folder_image_count(target_folder)
+        folder_count = sync_get_folder_image_count(target_folder, tenant_id=tenant_id)
         if folder_count == 0:
-            available = sync_list_all_indexed_folders()
+            available = sync_list_all_indexed_folders(tenant_id=tenant_id)
             avail_msg = f" Available indexed folders: {', '.join(available)}" if available else " No folders are currently indexed."
-            logger.warning("[Search Route] Folder '%s' is not available. %s", target_folder, avail_msg)
+            logger.warning("[Search Route] Folder '%s' is not available for tenant '%s'. %s", target_folder, tenant_id, avail_msg)
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Folder '{target_folder}' is not available or contains no indexed images.{avail_msg}"
             )
 
     filter_dict = {"folder": target_folder} if target_folder else None
-    logger.info("[Search Route] Executing visual search (folder_scope='%s', top_k=%d, threshold=%.2f)",
-                target_folder or "All Folders", top_k, threshold)
+    logger.info("[Search Route] Executing visual search (tenant='%s', folder_scope='%s', top_k=%d, threshold=%.2f)",
+                tenant_id, target_folder or "All Folders", top_k, threshold)
 
     res = service.search_by_image(
         cv_img=cv_img,
         top_k=top_k,
         threshold=threshold,
-        filter_dict=filter_dict
+        filter_dict=filter_dict,
+        tenant_id=tenant_id,
     )
 
     matches = []
@@ -127,6 +129,7 @@ async def search_by_multi_angle(
     threshold: float = Query(0.60, ge=0.0, le=1.0),
     service: ImageSearchService = Depends(get_image_search_service),
     current_user: dict = Depends(require_current_user),
+    tenant_id: str = Depends(get_current_tenant_id),
 ):
     """
     Search faces using multiple perspective angles (front, left, right).
@@ -135,11 +138,11 @@ async def search_by_multi_angle(
     target_folder = (folder_name or request.query_params.get("folder_name") or request.query_params.get("folder") or "").strip()
 
     if target_folder:
-        folder_count = sync_get_folder_image_count(target_folder)
+        folder_count = sync_get_folder_image_count(target_folder, tenant_id=tenant_id)
         if folder_count == 0:
-            available = sync_list_all_indexed_folders()
+            available = sync_list_all_indexed_folders(tenant_id=tenant_id)
             avail_msg = f" Available indexed folders: {', '.join(available)}" if available else " No folders are currently indexed."
-            logger.warning("[Multi-Angle Search] Folder '%s' is not available. %s", target_folder, avail_msg)
+            logger.warning("[Multi-Angle Search] Folder '%s' is not available for tenant '%s'. %s", target_folder, tenant_id, avail_msg)
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Folder '{target_folder}' is not available or contains no indexed images.{avail_msg}"
@@ -184,14 +187,15 @@ async def search_by_multi_angle(
         )
 
     filter_dict = {"folder": target_folder} if target_folder else None
-    logger.info("[Multi-Angle Search] Executing multi-angle search with angles %s (folder_scope='%s', top_k=%d)",
-                list(angle_embeddings.keys()), target_folder or "All Folders", top_k)
+    logger.info("[Multi-Angle Search] Executing multi-angle search for tenant '%s' with angles %s (folder_scope='%s', top_k=%d)",
+                tenant_id, list(angle_embeddings.keys()), target_folder or "All Folders", top_k)
 
     matches_data = service.search_multi_angle(
         angle_embeddings=angle_embeddings,
         top_k=top_k,
         threshold=threshold,
-        filter_dict=filter_dict
+        filter_dict=filter_dict,
+        tenant_id=tenant_id,
     )
 
     matches = []

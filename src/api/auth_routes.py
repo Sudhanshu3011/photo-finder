@@ -29,6 +29,7 @@ def register_user(
             password=req.password,
             role=req.role or "user",
             cloudinary_url=req.cloudinary_url,
+            tenant_id=req.tenant_id or "default",
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -43,6 +44,7 @@ def register_user(
         user_id=user["user_id"],
         username=user["username"],
         role=user.get("role", "user"),
+        tenant_id=user.get("tenant_id", "default"),
     )
 
 
@@ -66,6 +68,7 @@ def login_user(
         user_id=user["user_id"],
         username=user["username"],
         role=user.get("role", "user"),
+        tenant_id=user.get("tenant_id", "default"),
     )
 
 
@@ -79,6 +82,7 @@ def get_current_user_profile(
         username=current_user["username"],
         email=current_user["email"],
         role=current_user.get("role", "user"),
+        tenant_id=current_user.get("tenant_id", "default"),
         cloudinary_url=current_user.get("cloudinary_url"),
         created_at=current_user.get("created_at", ""),
     )

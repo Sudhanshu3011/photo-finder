@@ -4,17 +4,16 @@ scripts/cleanup_all.py — Complete cleanup script for Cloudinary and FAISS vect
 Cleans up:
 1. Cloudinary: deletes all uploaded assets across all folders, then deletes the folders.
 2. FAISS vector storage: wipes all .index files and re-initializes empty stores.
-3. SQLite metadata: clears vector_metadata, face_clusters, face_vector_clusters, upload_jobs, and kv_cache.
+3. Database metadata: clears vector_metadata and related tables.
 4. Local image cache: clears saved_images/ directory.
 """
 import os
-import shutil
-import sqlite3
 import cloudinary
 import cloudinary.api
 import cloudinary.uploader
 from src.core.config import DEFAULT_CLOUDINARY_URL, FAISS_DATA_DIR
 from src.modules.infra.faiss_engine import vector_engine
+from src.modules.infra.postgres_repository import sync_clear_vector_metadata
 
 def cleanup_cloudinary():
     print("\n[1/4] Cleaning Cloudinary...")
@@ -91,35 +90,13 @@ def cleanup_faiss():
         print(f"    Verified clean index '{name}': ntotal={idx.ntotal}")
 
 
-def cleanup_sqlite_metadata():
-    print("\n[3/4] Cleaning SQLite database metadata...")
-    db_paths = ["data/local_storage.db", "/app/data/local_storage.db"]
-    target_db = next((p for p in db_paths if os.path.exists(p)), None)
-
-    if not target_db:
-        print(" -> SQLite database file not found. Skipping.")
-        return
-
-    conn = sqlite3.connect(target_db)
-    cursor = conn.cursor()
-    tables_to_clear = [
-        "vector_metadata",
-        "face_clusters",
-        "face_vector_clusters",
-        "upload_jobs",
-        "kv_cache",
-    ]
-
-    for table in tables_to_clear:
-        try:
-            cursor.execute(f"DELETE FROM {table}")
-            print(f"    Cleared table: {table}")
-        except Exception as e:
-            print(f"    Could not clear table {table}: {e}")
-
-    conn.commit()
-    conn.close()
-    print(" -> SQLite metadata tables cleared successfully.")
+def cleanup_database_metadata():
+    print("\n[3/4] Cleaning vector metadata and database records...")
+    try:
+        sync_clear_vector_metadata()
+        print(" -> Vector metadata cleared successfully.")
+    except Exception as e:
+        print(f" -> Could not clear metadata: {e}")
 
 
 def cleanup_local_cache():
@@ -131,6 +108,7 @@ def cleanup_local_cache():
                 item_path = os.path.join(c_dir, item)
                 try:
                     if os.path.isdir(item_path):
+                        import shutil
                         shutil.rmtree(item_path)
                     else:
                         os.remove(item_path)
@@ -144,7 +122,7 @@ if __name__ == "__main__":
     print("=== STARTING COMPLETE CLEANUP ===")
     cleanup_cloudinary()
     cleanup_faiss()
-    cleanup_sqlite_metadata()
+    cleanup_database_metadata()
     cleanup_local_cache()
     print("\n✅ FAISS AND CLOUDINARY CLEANUP COMPLETED SUCCESSFULLY!\n")
 

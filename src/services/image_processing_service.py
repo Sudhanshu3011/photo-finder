@@ -13,7 +13,7 @@ from src.core.config import (
     FACE_DIM,
     ADAFACE_DIM,
 )
-from src.modules.infra.sqlite_repository import get_repository
+from src.modules.infra.postgres_repository import get_repository
 from src.modules.infra.faiss_engine import vector_engine
 from src.modules.infra.kv_cache import get_kv_cache
 from src.modules.vision.face_detector import detect_faces
@@ -21,6 +21,7 @@ from src.modules.vision.face_embedder import extract_face_embeddings
 from src.modules.vision.object_embedder import extract_object_embedding
 from src.modules.clustering.hdbscan_clusterer import run_hdbscan_clustering, select_cluster_representative
 from src.modules.storage.local_storage import get_image_path
+from src.core.tenant_context import get_current_tenant_id
 
 logger = logging.getLogger("src.services.image_processing_service")
 
@@ -44,13 +45,15 @@ class ImageProcessingService:
         user_id: Optional[str] = None,
         folder_name: Optional[str] = None,
         cloud_url: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Runs face and object embedding pipelines on an OpenCV BGR image
-        and inserts resulting vectors into the FAISS engine.
+        and inserts resulting vectors into the FAISS engine scoped to tenant.
         """
-        logger.info("[Image Processing] Ingesting image_id=%s for folder='%s' (resolution: %dx%d)",
-                    image_id, folder_name or "general", cv_img.shape[1], cv_img.shape[0])
+        tid = tenant_id or "default"
+        logger.info("[Image Processing] Ingesting image_id=%s for folder='%s' (tenant: '%s', resolution: %dx%d)",
+                    image_id, folder_name or "general", tid, cv_img.shape[1], cv_img.shape[0])
         
         # 1. Face Detection & Feature Extraction
         detected_faces = detect_faces(self.ai, cv_img)
@@ -75,19 +78,22 @@ class ImageProcessingService:
                     "face_idx": f["face_idx"],
                     "folder": folder_name or "general",
                     "url": cloud_url or "",
+                    "tenant_id": tid,
                 }
-                # Upsert into ArcFace stores
+                # Upsert into ArcFace stores scoped to tenant
                 self.engine.upsert_vectors(
                     index_name=IDX_FACES,
                     vectors=[arcface_vec],
                     ids=[vec_id],
-                    metadata=[meta]
+                    metadata=[meta],
+                    tenant_id=tid,
                 )
                 self.engine.upsert_vectors(
                     index_name=IDX_FACES_ARCFACE,
                     vectors=[arcface_vec],
                     ids=[vec_id],
-                    metadata=[meta]
+                    metadata=[meta],
+                    tenant_id=tid,
                 )
 
                 # Upsert into AdaFace store if available
@@ -96,7 +102,8 @@ class ImageProcessingService:
                         index_name=IDX_FACES_ADAFACE,
                         vectors=[adaface_vec],
                         ids=[vec_id],
-                        metadata=[meta]
+                        metadata=[meta],
+                        tenant_id=tid,
                     )
 
                 faces_saved += 1
@@ -111,29 +118,38 @@ class ImageProcessingService:
                 "user_id": user_id,
                 "folder": folder_name or "general",
                 "url": cloud_url or "",
+                "tenant_id": tid,
             }
             self.engine.upsert_vectors(
                 index_name=IDX_OBJECTS,
                 vectors=[obj_vec],
                 ids=[obj_id],
-                metadata=[meta]
+                metadata=[meta],
+                tenant_id=tid,
             )
             objects_saved += 1
 
-        logger.info("[Image Processing] Finished image_id=%s: indexed %d face vectors and %d scene/object descriptors into FAISS",
-                    image_id, faces_saved, objects_saved)
+        logger.info("[Image Processing] Finished image_id=%s: indexed %d face vectors and %d scene/object descriptors into FAISS (tenant: %s)",
+                    image_id, faces_saved, objects_saved, tid)
 
         return {
             "image_id": image_id,
             "faces_detected": faces_saved,
             "objects_detected": objects_saved,
             "folder": folder_name or "general",
+            "tenant_id": tid,
             "status": "success",
             "message": f"Extracted {faces_saved} faces and {objects_saved} object descriptors"
         }
 
-    def process_image_by_id(self, image_id: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+    def process_image_by_id(
+        self,
+        image_id: str,
+        user_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Load image from cache/disk and process."""
+        tid = (tenant_id or get_current_tenant_id()).strip()
         meta = self.cache.get(f"meta:{image_id}")
         local_path = meta.get("local_path") if meta else None
         folder_name = meta.get("folder") if meta else None
@@ -157,6 +173,7 @@ class ImageProcessingService:
             user_id=user_id,
             folder_name=folder_name,
             cloud_url=cloud_url,
+            tenant_id=tid,
         )
 
     def trigger_face_clustering(
@@ -165,28 +182,31 @@ class ImageProcessingService:
         epsilon: float = 0.25,
         folder_name: Optional[str] = None,
         user_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Gathers all stored face vectors (optionally filtered by folder), 
-        groups them with HDBSCAN, and updates cluster mappings in SQLite.
+        groups them with HDBSCAN, and updates cluster mappings in PostgreSQL.
         """
-        logger.info("[Face Clustering] Initiating identity clustering (folder='%s', min_cluster_size=%d, epsilon=%.2f)",
-                    folder_name or "ALL", min_cluster_size, epsilon)
+        tid = (tenant_id or get_current_tenant_id()).strip()
+        logger.info("[Face Clustering] Initiating identity clustering (tenant='%s', folder='%s', min_cluster_size=%d, epsilon=%.2f)",
+                    tid, folder_name or "ALL", min_cluster_size, epsilon)
 
         # Retrieve vectors from faiss engine
-        idx = self.engine.indices.get(IDX_FACES)
+        idx = self.engine.get_index(IDX_FACES, tenant_id=tid)
         if not idx or idx.ntotal == 0:
-            logger.warning("[Face Clustering] No face vectors available in index. Skipping clustering.")
+            logger.warning("[Face Clustering] No face vectors available in index for tenant %s. Skipping clustering.", tid)
             return {
                 "status": "success",
                 "clusters_found": 0,
                 "total_faces": 0,
                 "folder": folder_name,
+                "tenant_id": tid,
                 "message": "No face vectors available to cluster"
             }
 
         # Query all vectors and metadata
-        records = self.engine.get_all_records(IDX_FACES)
+        records = self.engine.get_all_records(IDX_FACES, tenant_id=tid)
 
         # Filter by folder if specified
         if folder_name and folder_name.strip():
@@ -205,6 +225,7 @@ class ImageProcessingService:
                 "clusters_found": 0,
                 "total_faces": len(records),
                 "folder": folder_name,
+                "tenant_id": tid,
                 "message": f"Too few face vectors for clustering in folder '{folder_name}'" if folder_name else "Too few face vectors for clustering"
             }
 
@@ -215,7 +236,7 @@ class ImageProcessingService:
             i_id = r.get("int_id")
             if i_id is None:
                 continue
-            vec = self.engine.reconstruct_vector(IDX_FACES, int(i_id))
+            vec = self.engine.reconstruct_vector(IDX_FACES, int(i_id), tenant_id=tid)
             if vec is not None:
                 vectors_list.append(vec)
                 meta = dict(r.get("metadata", {}) or {})
@@ -233,6 +254,7 @@ class ImageProcessingService:
                 "clusters_found": 0,
                 "total_faces": len(vectors_list),
                 "folder": folder_name,
+                "tenant_id": tid,
                 "message": "Not enough reconstructible vectors to cluster"
             }
 
@@ -259,25 +281,40 @@ class ImageProcessingService:
                 sample_crop_urls=[rep.get("image_id", "")],
                 user_id=user_id or "system",
                 folder=folder_name,
+                tenant_id=tid,
             )
             clusters_created += 1
 
-        logger.info("[Face Clustering] Finished clustering: discovered %d identity clusters across %d indexed faces",
-                    clusters_created, len(vectors))
+        logger.info("[Face Clustering] Finished clustering: discovered %d identity clusters across %d indexed faces (tenant: %s)",
+                    clusters_created, len(vectors), tid)
         return {
             "status": "success",
             "clusters_found": clusters_created,
             "total_faces": len(vectors),
             "folder": folder_name,
+            "tenant_id": tid,
             "message": f"Successfully clustered {len(vectors)} faces into {clusters_created} identity groups"
         }
 
-    def get_clusters(self, folder: Optional[str] = None, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        return self.repo.get_all_face_clusters(folder=folder, user_id=user_id)
+    def get_clusters(
+        self,
+        folder: Optional[str] = None,
+        user_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        tid = (tenant_id or get_current_tenant_id()).strip()
+        return self.repo.get_all_face_clusters(folder=folder, user_id=user_id, tenant_id=tid)
 
-    def rename_cluster(self, cluster_id: str, new_name: str) -> bool:
-        return self.repo.update_cluster_name(cluster_id, new_name)
+    def rename_cluster(
+        self,
+        cluster_id: str,
+        new_name: str,
+        tenant_id: Optional[str] = None,
+    ) -> bool:
+        tid = (tenant_id or get_current_tenant_id()).strip()
+        return self.repo.update_cluster_name(cluster_id, new_name, tenant_id=tid)
 
-    def get_job_status(self, job_id: str) -> Optional[Dict[str, Any]]:
-        return self.repo.get_job_by_id(job_id)
+    def get_job_status(self, job_id: str, tenant_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        tid = (tenant_id or get_current_tenant_id()).strip()
+        return self.repo.get_job_by_id(job_id, tenant_id=tid)
 

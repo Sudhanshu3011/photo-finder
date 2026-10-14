@@ -7,7 +7,7 @@ from fastapi import UploadFile
 from src.modules.vision.image_quality import assess_image_quality
 from src.modules.storage.local_storage import save_image_bytes, get_image_path
 from src.modules.storage.cloudinary_storage import upload_image_to_cloudinary
-from src.modules.infra.sqlite_repository import get_repository
+from src.modules.infra.postgres_repository import get_repository
 from src.modules.infra.kv_cache import get_kv_cache
 
 logger = logging.getLogger("src.services.photo_upload_service")
@@ -27,6 +27,7 @@ class PhotoUploadService:
         user_id: Optional[str] = None,
         save_to_cloud: bool = True,
         cloudinary_creds: Optional[dict] = None,
+        tenant_id: Optional[str] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """
@@ -115,6 +116,7 @@ class PhotoUploadService:
             "local_path": local_path,
             "cloud_url": cloud_url,
             "folder": folder_name,
+            "tenant_id": tenant_id or "default",
             "width": quality.get("width"),
             "height": quality.get("height"),
             "is_blurry": quality.get("is_blurry"),
@@ -123,13 +125,14 @@ class PhotoUploadService:
         }
         self.cache.set(f"meta:{image_id}", meta)
 
-        logger.info("[photo_upload_service.ingest_single_photo] Successfully ingested %s (folder=%s, cloud=%s)",
-                    image_id, folder_name, bool(cloud_url))
+        logger.info("[photo_upload_service.ingest_single_photo] Successfully ingested %s (folder=%s, tenant=%s, cloud=%s)",
+                    image_id, folder_name, tenant_id or "default", bool(cloud_url))
 
         return {
             "image_id": image_id,
             "filename": filename,
             "folder": folder_name,
+            "tenant_id": tenant_id or "default",
             "status": "success",
             "message": "Photo uploaded and stored successfully",
             "width": quality.get("width"),
@@ -144,16 +147,18 @@ class PhotoUploadService:
         folder_name: str = "general",
         user_id: Optional[str] = None,
         cloudinary_creds: Optional[dict] = None,
+        tenant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Handle batch photo uploads into a specific folder, tracking via SQLite.
+        Handle batch photo uploads into a specific folder, tracking via database.
         """
+        tid = tenant_id or "default"
         job_id = f"job_{uuid.uuid4().hex[:12]}"
         total = len(files)
-        logger.info("[photo_upload_service.ingest_batch_photos] Starting batch job_id=%s with %d files into folder '%s'",
-                    job_id, total, folder_name)
+        logger.info("[photo_upload_service.ingest_batch_photos] Starting batch job_id=%s with %d files into folder '%s' (tenant: '%s')",
+                    job_id, total, folder_name, tid)
 
-        self.repo.create_job(job_id=job_id, total_images=total)
+        self.repo.create_job(job_id=job_id, total_images=total, user_id=user_id or "anonymous", folder=folder_name, tenant_id=tid)
 
         items = []
         successful = 0
@@ -165,6 +170,7 @@ class PhotoUploadService:
                 folder_name=folder_name,
                 user_id=user_id,
                 cloudinary_creds=cloudinary_creds,
+                tenant_id=tid,
             )
             items.append(res)
             if res.get("status") == "success":

@@ -3,7 +3,7 @@ tests/unit/test_faiss_service.py — Unit tests for local FAISS Vector Storage E
 Validates:
 - Vector upsert and normalization
 - Exact Cosine Similarity ranking
-- Metadata persistence in SQLite
+- Metadata persistence
 - ID-based deletion
 - URL-based and folder-based deletion
 - Index reset
