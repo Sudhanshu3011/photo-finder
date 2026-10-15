@@ -1,69 +1,39 @@
 """
-scripts/cleanup_all.py — Complete cleanup script for Cloudinary and FAISS vector stores.
+scripts/cleanup_all.py — Complete cleanup script for AWS S3 and FAISS vector stores.
 
 Cleans up:
-1. Cloudinary: deletes all uploaded assets across all folders, then deletes the folders.
+1. AWS S3: deletes all uploaded assets across tenant prefixes.
 2. FAISS vector storage: wipes all .index files and re-initializes empty stores.
 3. Database metadata: clears vector_metadata and related tables.
 4. Local image cache: clears saved_images/ directory.
 """
 import os
-import cloudinary
-import cloudinary.api
-import cloudinary.uploader
-from src.core.config import DEFAULT_CLOUDINARY_URL, FAISS_DATA_DIR
+import shutil
+from src.core.config import FAISS_DATA_DIR
 from src.modules.infra.faiss_engine import vector_engine
 from src.modules.infra.postgres_repository import sync_clear_vector_metadata
+from src.modules.storage.s3_storage import get_s3_bucket, delete_s3_folder, list_s3_objects, delete_s3_object
 
-def cleanup_cloudinary():
-    print("\n[1/4] Cleaning Cloudinary...")
-    if not DEFAULT_CLOUDINARY_URL:
-        print(" -> No DEFAULT_CLOUDINARY_URL configured. Skipping Cloudinary cleanup.")
+def cleanup_s3():
+    print("\n[1/4] Cleaning AWS S3 Object Storage...")
+    bucket = get_s3_bucket()
+    if not bucket:
+        print(" -> No AWS S3 bucket configured. Skipping S3 cleanup.")
         return
 
-    cloudinary.config(cloudinary_url=DEFAULT_CLOUDINARY_URL)
-
-    # 1. List and delete resources folder by folder
     try:
-        root_folders_resp = cloudinary.api.root_folders()
-        folders = [f["name"] for f in root_folders_resp.get("folders", [])]
-        print(f" -> Discovered root folders: {folders}")
-        for folder in folders:
-            print(f"    Deleting resources in folder '{folder}'...")
-            try:
-                cloudinary.api.delete_resources_by_prefix(f"{folder}/")
-            except Exception as e:
-                print(f"    Warning deleting prefix {folder}/: {e}")
-            try:
-                cloudinary.api.delete_folder(folder)
-                print(f"    Deleted folder '{folder}'")
-            except Exception as e:
-                print(f"    Note on deleting folder '{folder}': {e}")
+        objects = list_s3_objects(prefix="", bucket=bucket, max_keys=1000)
+        print(f" -> Found {len(objects)} objects in bucket '{bucket}' to clean up.")
+        for obj in objects:
+            key = obj.get("key")
+            if key:
+                delete_s3_object(key=key, bucket=bucket)
+        print(" -> S3 cleanup completed.")
     except Exception as e:
-        print(f" -> Error inspecting root folders: {e}")
+        print(f" -> Error during S3 cleanup: {e}")
 
-    # 2. Delete any leftover upload resources (e.g. at root level)
-    while True:
-        try:
-            res = cloudinary.api.resources(type="upload", max_results=500)
-            items = res.get("resources", [])
-            if not items:
-                print(" -> All Cloudinary upload resources successfully deleted.")
-                break
-            public_ids = [item["public_id"] for item in items]
-            print(f"    Deleting batch of {len(public_ids)} remaining resources...")
-            cloudinary.api.delete_resources(public_ids)
-        except Exception as e:
-            print(f" -> Error during batch resource deletion: {e}")
-            break
-
-    # 3. Final verification
-    try:
-        check = cloudinary.api.resources(type="upload", max_results=10)
-        remaining = len(check.get("resources", []))
-        print(f" -> Final Cloudinary verification: {remaining} remaining resources.")
-    except Exception as e:
-        print(f" -> Verification error: {e}")
+# Backward compatibility alias
+cleanup_cloudinary = cleanup_s3
 
 
 def cleanup_faiss():
@@ -108,7 +78,6 @@ def cleanup_local_cache():
                 item_path = os.path.join(c_dir, item)
                 try:
                     if os.path.isdir(item_path):
-                        import shutil
                         shutil.rmtree(item_path)
                     else:
                         os.remove(item_path)
@@ -120,9 +89,9 @@ def cleanup_local_cache():
 
 if __name__ == "__main__":
     print("=== STARTING COMPLETE CLEANUP ===")
-    cleanup_cloudinary()
+    cleanup_s3()
     cleanup_faiss()
     cleanup_database_metadata()
     cleanup_local_cache()
-    print("\n✅ FAISS AND CLOUDINARY CLEANUP COMPLETED SUCCESSFULLY!\n")
+    print("\n✅ FAISS AND AWS S3 CLEANUP COMPLETED SUCCESSFULLY!\n")
 

@@ -11,7 +11,8 @@ class RegisterRequest(BaseModel):
     )
     password: str = Field(..., min_length=6, description="Password (at least 6 characters)", examples=["secret123"])
     role: Optional[str] = Field("user", description="User role ('user' or 'admin')", examples=["user"])
-    cloudinary_url: Optional[str] = Field(None, description="Optional Cloudinary connection string (cloudinary://api_key:api_secret@cloud_name)")
+    storage_bucket: Optional[str] = Field(None, description="Optional S3 storage bucket override", examples=["my-s3-bucket"])
+    cloudinary_url: Optional[str] = Field(None, description="Deprecated: legacy storage parameter")
     tenant_id: Optional[str] = Field("default", description="Organization / Tenant ID for multi-tenant isolation", examples=["org_corporate"])
 
 class LoginRequest(BaseModel):
@@ -33,16 +34,23 @@ class UserProfileResponse(BaseModel):
     email: str
     role: str
     tenant_id: str = "default"
+    storage_bucket: Optional[str] = None
     cloudinary_url: Optional[str] = None
     created_at: str
 
-class CloudinaryConfigRequest(BaseModel):
-    cloudinary_url: str = Field(..., description="Cloudinary connection string (cloudinary://api_key:api_secret@cloud_name)")
+class StorageConfigRequest(BaseModel):
+    s3_bucket: Optional[str] = Field(None, description="AWS S3 bucket name")
+    aws_region: Optional[str] = Field(None, description="AWS Region (e.g. us-east-1)")
 
-class CloudinaryConfigResponse(BaseModel):
+class StorageConfigResponse(BaseModel):
     status: str
     message: str
+    bucket: Optional[str] = None
     cloud_name: Optional[str] = None
     configured: bool = True
+
+# Backward compatibility aliases
+CloudinaryConfigRequest = StorageConfigRequest
+CloudinaryConfigResponse = StorageConfigResponse
 
 

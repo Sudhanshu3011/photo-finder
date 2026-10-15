@@ -1155,6 +1155,56 @@ class PostgresRepository:
     def update_cluster_name(self, cluster_id: str, new_name: str, tenant_id: Optional[str] = None) -> bool:
         return _run_sync(db_rename_cluster(cluster_id, new_name, user_id="", tenant_id=tenant_id))
 
+    def find_duplicate_by_hash(
+        self,
+        sha256: str,
+        phash: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Searches for duplicate vector record by exact SHA256 or perceptual hash."""
+        tid = (tenant_id or get_current_tenant_id()).strip()
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+
+        if pool:
+            async def _find():
+                async with get_tenant_connection(tid) as conn:
+                    row = await conn.fetchrow(
+                        """
+                        SELECT int_id, tenant_id, index_name, vector_id, url, folder, metadata_json
+                        FROM vector_metadata
+                        WHERE tenant_id = $1
+                          AND (
+                            metadata_json->>'sha256' = $2
+                            OR ($3 IS NOT NULL AND metadata_json->>'phash' = $3)
+                          )
+                        LIMIT 1
+                        """,
+                        tid, sha256, phash
+                    )
+                    if row:
+                        meta = json.loads(row["metadata_json"]) if isinstance(row["metadata_json"], str) else row["metadata_json"]
+                        return {
+                            "int_id": row["int_id"],
+                            "vector_id": row["vector_id"],
+                            "url": row["url"],
+                            "folder": row["folder"],
+                            "metadata": meta,
+                        }
+                    return None
+            return _run_sync(_find())
+
+        with _mem_lock:
+            for item in _mem_vector_metadata.values():
+                if item.get("tenant_id") == tid:
+                    meta = item.get("metadata", {})
+                    item_sha = meta.get("sha256")
+                    item_phash = meta.get("phash")
+                    if item_sha and item_sha == sha256:
+                        return dict(item)
+                    if phash and item_phash and item_phash == phash:
+                        return dict(item)
+            return None
+
 
 _repo_instance: Optional[PostgresRepository] = None
 
@@ -1165,3 +1215,7 @@ def get_repository() -> PostgresRepository:
     if _repo_instance is None:
         _repo_instance = PostgresRepository()
     return _repo_instance
+
+
+get_postgres_repo = get_repository
+

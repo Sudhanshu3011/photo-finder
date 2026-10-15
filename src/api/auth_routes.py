@@ -1,15 +1,20 @@
 import logging
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from src.schemas.auth_schemas import (
     RegisterRequest,
     LoginRequest,
     TokenResponse,
     UserProfileResponse,
+    StorageConfigRequest,
+    StorageConfigResponse,
     CloudinaryConfigRequest,
     CloudinaryConfigResponse,
 )
 from src.services.user_auth_service import UserAuthService, get_auth_service
 from src.api.dependencies import require_current_user
+from src.modules.infra.kv_cache import get_kv_cache
+from src.modules.storage.s3_storage import get_s3_bucket, ping_s3
 
 logger = logging.getLogger("src.api.auth_routes")
 
@@ -28,7 +33,7 @@ def register_user(
             email=req.email,
             password=req.password,
             role=req.role or "user",
-            cloudinary_url=req.cloudinary_url,
+            storage_bucket=req.storage_bucket,
             tenant_id=req.tenant_id or "default",
         )
     except ValueError as e:
@@ -83,84 +88,70 @@ def get_current_user_profile(
         email=current_user["email"],
         role=current_user.get("role", "user"),
         tenant_id=current_user.get("tenant_id", "default"),
+        storage_bucket=current_user.get("storage_bucket") or current_user.get("cloudinary_url"),
         cloudinary_url=current_user.get("cloudinary_url"),
         created_at=current_user.get("created_at", ""),
     )
 
 
-@router.post("/cloudinary-config", response_model=CloudinaryConfigResponse)
-def set_cloudinary_configuration(
-    req: CloudinaryConfigRequest,
+@router.post("/storage-config", response_model=StorageConfigResponse)
+@router.post("/cloudinary-config", response_model=StorageConfigResponse)
+def set_storage_configuration(
+    req: StorageConfigRequest,
     current_user: dict = Depends(require_current_user),
     service: UserAuthService = Depends(get_auth_service),
 ):
     """
-    Configure and verify Cloudinary credentials for the authenticated user.
-    Validates connection with a live ping before saving to user profile.
+    Configure and verify AWS S3 bucket storage for the authenticated user.
     """
-    from src.common.utils import get_cloudinary_creds
-    from src.modules.storage.cloudinary_storage import ping_cloudinary
-    from src.modules.infra.kv_cache import get_kv_cache
-
-    cld_url = req.cloudinary_url.strip()
-    creds = get_cloudinary_creds(cld_url)
-    if not creds.get("cloud_name") or not creds.get("api_key") or not creds.get("api_secret"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid Cloudinary URL format. Expected: cloudinary://api_key:api_secret@cloud_name"
-        )
-
+    bucket = req.s3_bucket or get_s3_bucket()
     try:
-        ping_cloudinary(creds)
+        ping_s3(bucket=bucket)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cloudinary connection test failed: {str(e)}"
+            detail=f"S3 storage connection test failed: {str(e)}"
         )
 
-    # Save to user's database record
-    service.update_cloudinary_url(current_user["user_id"], cld_url)
+    service.update_storage_config(current_user["user_id"], bucket)
 
     cache = get_kv_cache()
-    cache.set(f"user_cld:{current_user['user_id']}", cld_url)
-    cache.set("system_cld_config", cld_url)
+    cache.set(f"user_storage:{current_user['user_id']}", bucket)
 
-    return CloudinaryConfigResponse(
+    return StorageConfigResponse(
         status="success",
-        message="User Cloudinary storage verified and saved successfully to profile",
-        cloud_name=creds.get("cloud_name"),
+        message="AWS S3 storage bucket verified and saved successfully to profile",
+        bucket=bucket,
+        cloud_name=bucket,
         configured=True,
     )
 
 
-@router.get("/cloudinary-config", response_model=CloudinaryConfigResponse)
-def get_cloudinary_configuration(
+@router.get("/storage-config", response_model=StorageConfigResponse)
+@router.get("/cloudinary-config", response_model=StorageConfigResponse)
+def get_storage_configuration(
     current_user: dict = Depends(require_current_user),
 ):
-    """Check current Cloudinary configuration status for the authenticated user."""
-    from src.common.utils import get_cloudinary_creds
-    from src.modules.infra.kv_cache import get_kv_cache
-    from src.core.config import DEFAULT_CLOUDINARY_URL
-
+    """Check current S3 object storage configuration status for the authenticated user."""
     cache = get_kv_cache()
-    cld_url = (
-        current_user.get("cloudinary_url")
-        or cache.get(f"user_cld:{current_user['user_id']}")
-        or cache.get("system_cld_config")
-        or DEFAULT_CLOUDINARY_URL
+    bucket = (
+        current_user.get("storage_bucket")
+        or cache.get(f"user_storage:{current_user['user_id']}")
+        or get_s3_bucket()
     )
-    creds = get_cloudinary_creds(str(cld_url)) if cld_url else {}
 
-    if creds.get("cloud_name"):
-        return CloudinaryConfigResponse(
+    if bucket:
+        return StorageConfigResponse(
             status="success",
-            message=f"Cloudinary storage is configured for {current_user['username']}",
-            cloud_name=creds.get("cloud_name"),
+            message=f"AWS S3 storage is configured for {current_user['username']}",
+            bucket=str(bucket),
+            cloud_name=str(bucket),
             configured=True,
         )
-    return CloudinaryConfigResponse(
+    return StorageConfigResponse(
         status="unconfigured",
-        message="Cloudinary storage is not configured",
+        message="Object storage is not configured",
+        bucket=None,
         cloud_name=None,
         configured=False,
     )

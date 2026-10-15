@@ -46,7 +46,7 @@ def process_uploaded_image(
 @router.post("/api/clusters/generate", response_model=ClusteringTriggerResponse)
 async def trigger_face_clustering(
     request: Request,
-    folder_name: str = Query(..., description="Cloudinary folder name to cluster faces from"),
+    folder_name: str = Query(..., description="Folder/album name to cluster faces from"),
     min_cluster_size: int = Query(3, ge=2, description="Minimum face count required to form an identity cluster"),
     epsilon: float = Query(0.25, ge=0.01, le=1.0, description="DBSCAN / HDBSCAN cluster distance tolerance"),
     service: ImageProcessingService = Depends(get_image_processing_service),
@@ -82,7 +82,7 @@ async def trigger_face_clustering(
 
 @router.get("/api/clusters", response_model=List[FaceClusterResponse])
 def get_all_clusters(
-    folder_name: Optional[str] = Query(None, description="Filter clusters by Cloudinary folder name"),
+    folder_name: Optional[str] = Query(None, description="Filter clusters by folder/album name"),
     service: ImageProcessingService = Depends(get_image_processing_service),
     current_user: dict = Depends(require_current_user),
     tenant_id: str = Depends(get_current_tenant_id),

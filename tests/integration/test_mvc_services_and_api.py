@@ -130,10 +130,10 @@ async def test_image_search_service(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_cloudinary_config_and_folder_scoping(client: AsyncClient):
-    """Test single-time Cloudinary configuration, folder-targeted upload, and folder-scoped search."""
+async def test_storage_config_and_folder_scoping(client: AsyncClient):
+    """Test object storage configuration, folder-targeted upload, and folder-scoped search."""
     # 1. Check current config
-    cfg_resp = await client.get("/api/auth/cloudinary-config")
+    cfg_resp = await client.get("/api/auth/storage-config")
     assert cfg_resp.status_code == 200
     assert "configured" in cfg_resp.json()
 

@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional
 
 from src.core.logging import log, warn
 from src.core.tenant_context import get_current_tenant_id
+from src.modules.storage.local_storage import get_image_path
+
 
 logger = logging.getLogger("src.modules.storage.s3_storage")
 
@@ -66,14 +68,16 @@ def get_s3_bucket(creds: Optional[dict] = None) -> str:
     return (c.get("bucket_name") or AWS_S3_BUCKET).strip()
 
 
-def build_s3_url(key: str, bucket: str, region: str = "us-east-1") -> str:
+def build_s3_url(key: str, bucket: Optional[str] = None, region: Optional[str] = None) -> str:
     """Build permanent HTTPS URL for an S3 object."""
+    b_name = bucket or get_s3_bucket()
+    reg = region or AWS_REGION or "us-east-1"
     if AWS_S3_PUBLIC_URL_PREFIX:
         prefix = AWS_S3_PUBLIC_URL_PREFIX.rstrip("/")
         return f"{prefix}/{key}"
-    if region == "us-east-1":
-        return f"https://{bucket}.s3.amazonaws.com/{key}"
-    return f"https://{bucket}.s3.{region}.amazonaws.com/{key}"
+    if reg == "us-east-1":
+        return f"https://{b_name}.s3.amazonaws.com/{key}"
+    return f"https://{b_name}.s3.{reg}.amazonaws.com/{key}"
 
 
 def ping_s3(bucket: Optional[str] = None, creds: Optional[dict] = None) -> bool:
@@ -169,6 +173,60 @@ def upload_image_to_s3(
             "key": s3_key,
             "bucket": b_name,
         }
+
+
+def check_s3_object_exists(
+    key: str,
+    bucket: Optional[str] = None,
+    creds: Optional[dict] = None,
+) -> bool:
+    """Checks if an object exists in AWS S3 using a fast metadata HEAD request."""
+    b_name = bucket or get_s3_bucket(creds)
+    client = get_s3_client(creds)
+    if not client:
+        return False
+    try:
+        client.head_object(Bucket=b_name, Key=key)
+        return True
+    except Exception:
+        return False
+
+
+def download_image_from_s3(
+    key: str,
+    bucket: Optional[str] = None,
+    creds: Optional[dict] = None,
+) -> bytes:
+    """
+    Downloads image bytes from AWS S3 using durable object key reference.
+    Includes local disk fallback for development or offline testing environments.
+    """
+    b_name = bucket or get_s3_bucket(creds)
+    client = get_s3_client(creds)
+    if client:
+        try:
+            buf = io.BytesIO()
+            client.download_fileobj(b_name, key, buf)
+            return buf.getvalue()
+        except Exception as e:
+            log("WARN", "storage.s3.download_failed", bucket=b_name, key=key, error=str(e))
+
+    # Fallback to local files if key matches saved or local temp file
+    filename = key.split("/")[-1]
+    local_p = get_image_path(filename)
+    if os.path.exists(local_p):
+        with open(local_p, "rb") as f:
+            return f.read()
+
+    # Search in saved_images / temp_uploads / data
+    for base_dir in ["saved_images", "temp_uploads", "data"]:
+        candidate = os.path.join(base_dir, filename)
+        if os.path.exists(candidate):
+            with open(candidate, "rb") as f:
+                return f.read()
+
+    raise FileNotFoundError(f"S3 Object '{key}' could not be retrieved from S3 or local fallback")
+
 
 
 def list_s3_folders(
@@ -286,4 +344,38 @@ def delete_s3_folder(
     except Exception as e:
         log("ERROR", "storage.s3.delete_folder_failed", folder=folder, error=str(e))
         raise e
+
+
+def list_s3_objects(
+    prefix: str = "",
+    bucket: Optional[str] = None,
+    creds: Optional[dict] = None,
+    max_keys: int = 1000,
+) -> List[Dict[str, Any]]:
+    """Lists S3 objects under prefix as a flat list of dictionaries."""
+    client = get_s3_client(creds)
+    b_name = bucket or get_s3_bucket(creds)
+    if not client:
+        return []
+    try:
+        kwargs: Dict[str, Any] = {"Bucket": b_name, "MaxKeys": max_keys}
+        if prefix:
+            kwargs["Prefix"] = prefix
+        res = client.list_objects_v2(**kwargs)
+        items = []
+        for obj in res.get("Contents", []):
+            k = obj["Key"]
+            items.append({
+                "key": k,
+                "url": build_s3_url(k, b_name),
+                "size": obj.get("Size", 0),
+            })
+        return items
+    except Exception as e:
+        logger.error("[s3_storage.list_s3_objects] Failed to list objects: %s", e)
+        return []
+
+
+delete_s3_object = delete_s3_resource
+
 

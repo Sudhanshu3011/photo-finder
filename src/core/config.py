@@ -11,15 +11,6 @@ load_dotenv()
 # Credentals / Secrets (set in HF Space secrets) / KEYS / URLS
 # ===============================================================
 
-# Cloudinary CDN credentials (legacy fallback)
-DEFAULT_CLOUDINARY_URL = os.getenv("DEFAULT_CLOUDINARY_URL") or os.getenv("CLOUDINARY_URL", "")
-if not DEFAULT_CLOUDINARY_URL:
-    _c_name = os.getenv("CLOUDINARY_CLOUD_NAME", "")
-    _c_key = os.getenv("CLOUDINARY_API_KEY", "")
-    _c_sec = os.getenv("CLOUDINARY_API_SECRET", "")
-    if _c_name and _c_key and _c_sec:
-        DEFAULT_CLOUDINARY_URL = f"cloudinary://{_c_key}:{_c_sec}@{_c_name}"
-
 # AWS S3 Object Storage Configuration
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
@@ -176,3 +167,12 @@ CLUSTER_EPSILON = float(os.getenv("CLUSTER_EPSILON", "0.20"))  # Tightened from 
 
 # Auto re-cluster after every N new face uploads (0 = disabled, manual only)
 CLUSTER_AUTO_TRIGGER_EVERY = int(os.getenv("CLUSTER_AUTO_TRIGGER_EVERY", "0"))
+
+# ──────────────────────────────────────────────────────────────
+# Phase 2: Celery Distributed Worker Fleet Settings
+# ──────────────────────────────────────────────────────────────
+REDIS_URL_DEFAULT = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", REDIS_URL_DEFAULT)
+CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", REDIS_URL_DEFAULT)
+CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER", "False").lower() in ("true", "1")
+ENABLE_CELERY_WORKERS = os.getenv("ENABLE_CELERY_WORKERS", "1").lower() in ("true", "1")

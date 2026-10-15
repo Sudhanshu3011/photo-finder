@@ -29,7 +29,7 @@ def test_upload_schemas():
         image_id="img_100",
         filename="photo.jpg",
         status="uploaded",
-        cloud_url="https://cloudinary.com/test.jpg"
+        cloud_url="https://s3.amazonaws.com/test-bucket/test.jpg"
     )
     resp = PhotoUploadResponse(status="success", data=item)
     assert resp.status == "success"

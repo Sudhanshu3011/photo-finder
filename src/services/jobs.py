@@ -369,7 +369,7 @@ async def _execute_upload_job(job_id: str, payload: dict, app_state) -> None:
         all_results = []
         processed = 0
 
-        # Mode A: Decoupled Upload (files are on local disk in temp_dir, already uploaded to Cloudinary)
+        # Mode A: Decoupled Upload (files are on local disk in temp_dir, already uploaded to S3 / Object Storage)
         if files_list:
             for i, f_info in enumerate(files_list):
                 file_id = f_info["file_id"]

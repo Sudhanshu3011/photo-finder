@@ -164,7 +164,7 @@ def step5_search_images(folder_name: str, query_image_bytes: bytes):
 def main():
     parser = argparse.ArgumentParser(description="Test Ingest 50 Images and Visual Search")
     parser.add_argument("--images-dir", type=str, default=None, help="Path to local folder containing images")
-    parser.add_argument("--folder-name", type=str, default="test_album_50", help="Target Cloudinary/gallery album name")
+    parser.add_argument("--folder-name", type=str, default="test_album_50", help="Target gallery album / S3 prefix name")
     parser.add_argument("--count", type=int, default=50, help="Number of images to ingest (default: 50)")
     parser.add_argument("--auto-generate", action="store_true", help="Auto-generate synthetic test images")
     args = parser.parse_args()
