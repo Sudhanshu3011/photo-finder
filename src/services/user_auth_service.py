@@ -19,6 +19,7 @@ class UserAuthService:
         email: str,
         password: str,
         role: str = "user",
+        storage_bucket: Optional[str] = None,
         cloudinary_url: Optional[str] = None,
         tenant_id: str = "default",
     ) -> Dict[str, Any]:
@@ -38,13 +39,14 @@ class UserAuthService:
         user_id = f"user_{uuid.uuid4().hex[:12]}"
         hashed_pw = hash_password(password)
 
+        bucket_or_url = storage_bucket or cloudinary_url
         created = self.repo.create_user(
             user_id=user_id,
             username=username,
             email=email,
             hashed_password=hashed_pw,
             role=role,
-            cloudinary_url=cloudinary_url,
+            cloudinary_url=bucket_or_url,
             tenant_id=tenant_id or "default",
         )
         if not created:
@@ -103,10 +105,15 @@ class UserAuthService:
         """Retrieve user profile by ID."""
         return self.repo.get_user_by_id(user_id)
 
+    def update_storage_config(self, user_id: str, bucket_or_config: str) -> bool:
+        """Update storage bucket / config on user's profile."""
+        logger.info("[user_auth_service.update_storage_config] Updating storage bucket for user_id=%s to %s", user_id, bucket_or_config)
+        return self.repo.update_user_cloudinary_url(user_id, bucket_or_config)
+
     def update_cloudinary_url(self, user_id: str, cloudinary_url: str) -> bool:
-        """Update Cloudinary URL on the user's profile."""
+        """Update Cloudinary URL on the user's profile (deprecated alias)."""
         logger.info("[user_auth_service.update_cloudinary_url] Updating Cloudinary credentials for user_id=%s", user_id)
-        return self.repo.update_user_cloudinary_url(user_id, cloudinary_url)
+        return self.update_storage_config(user_id, cloudinary_url)
 
 
 _auth_service_instance: Optional[UserAuthService] = None

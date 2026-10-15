@@ -1,5 +1,6 @@
 import re
 import math
+import httpx
 from fastapi import Request
 
 # Get the Real IP of the User not the infra IP (if behind proxy) for logging and abuse monitoring.
@@ -15,69 +16,14 @@ def is_default_key(key: str, default: str) -> bool:
         return False
     return key.strip() == default.strip()
 
-# Takes The Cloduinary URL and extracts the credentials from it and returns a dict with cloud_name, api_key and api_secret.
-def get_cloudinary_creds(url: str) -> dict:
-    if not url or not url.startswith("cloudinary://"):
-        return {}
-    try:
-        creds = url.replace("cloudinary://", "")
-        auth, cloud_name = creds.split("@")
-        api_key, api_secret = auth.split(":")
-        return {
-            "cloud_name": cloud_name,
-            "api_key": api_key,
-            "api_secret": api_secret,
-        }
-    except ValueError:
-        return {}
-
-# Replace everything except letters, numbers, _, -, . with underscores
-def sanitize_filename(filename: str) -> str:
-    if not filename:
-        return "unnamed_file"
-    return re.sub(r'[^a-zA-Z0-9_\-\.]', '_', filename)
-
-# Lower Casing the File Name
-def standardize_category_name(name: str) -> str:
-    if not name:
-        return "uncategorized"
-    return re.sub(r'[^a-zA-Z0-9_\-]', '_', name.lower())
-
-
-def to_list(vector) -> list[float]:
-    if vector is None:
-        return []
-    try:
-        return [float(x) for x in vector]
-    except TypeError:
-        return []
-
-# Extracting the ID from The URL
-def url_to_public_id(url: str) -> str:
+# S3 and Image URL Helpers
+def get_s3_key_from_url(url: str) -> str:
+    """Extract object key from standard S3 URL format."""
     if not url:
         return ""
-    try:
-        parts = url.split("/upload/")
-        if len(parts) > 1:
-            path = parts[1].split("/", 1)[-1]
-            # Splits From Right and place that thing first in list
-            return path.rsplit(".", 1)[0]
-        return ""
-    except Exception:
-        return ""
-
-
-def cld_thumb_url(url: str) -> str:
-    if not url:
-        return ""
-    return url.replace("/upload/", "/upload/c_limit,w_500/")
-
-
-def cld_face_thumb_url(url: str, width: int = 300) -> str:
-    """Generate optimized thumbnail URL for face images (smaller than general thumbs)."""
-    if not url:
-        return ""
-    return url.replace("/upload/", f"/upload/c_limit,w_{width},q_30,f_auto/")
+    if ".amazonaws.com/" in url:
+        return url.split(".amazonaws.com/", 1)[-1].split("?")[0]
+    return url.split("/")[-1]
 
 
 def face_ui_score(raw_score: float, mode: str = "fused") -> float:
@@ -104,8 +50,7 @@ def face_ui_score(raw_score: float, mode: str = "fused") -> float:
 
 
 async def fetch_image_bytes_from_url(url: str, timeout: float = 15.0) -> bytes:
-    """Download image bytes from an HTTP/HTTPS URL (e.g. Cloudinary CDN)."""
-    import httpx
+    """Download image bytes from an HTTP/HTTPS URL (e.g. AWS S3 / CDN)."""
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         resp = await client.get(url)
         resp.raise_for_status()

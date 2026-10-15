@@ -47,7 +47,7 @@ HTML_PAGE = """<!DOCTYPE html>
       <span>Batch Photo Uploader & Indexer</span>
       <span class="badge-limit">Max 50 Photos / Batch</span>
     </h1>
-    <p class="subtitle">Select or drop up to 50 photos to upload to Cloudinary and index into FAISS vector stores.</p>
+    <p class="subtitle">Select or drop up to 50 photos to upload to AWS S3 and index into FAISS vector stores.</p>
 
     <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
       <svg width="42" height="42" fill="none" stroke="#38bdf8" stroke-width="2" viewBox="0 0 24 24" style="margin: 0 auto 0.5rem auto; display: block;"><path d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
@@ -65,13 +65,13 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
 
     <div class="form-group">
-      <label for="folderInput">Cloudinary Target Folder / Album</label>
+      <label for="folderInput">Target Album / S3 Prefix</label>
       <input type="text" id="folderInput" value="general" placeholder="e.g. wedding_2026, vacation, portraits">
     </div>
 
     <div class="form-group">
-      <label for="cldInput">Cloudinary URL (Optional — auto-fetched from user profile if omitted)</label>
-      <input type="password" id="cldInput" placeholder="cloudinary://api_key:api_secret@cloud_name">
+      <label for="cldInput">Target S3 Bucket (Optional — defaults to server AWS_S3_BUCKET)</label>
+      <input type="text" id="cldInput" placeholder="e.g. visual-search-media">
     </div>
 
     <div class="checkbox-group">
@@ -170,8 +170,9 @@ HTML_PAGE = """<!DOCTYPE html>
       const formData = new FormData();
       formData.append('folder_name', folder);
       if (cld) {
+        formData.append('s3_bucket', cld);
         formData.append('cloudinary_url', cld);
-        localStorage.setItem('cld_url', cld);
+        localStorage.setItem('s3_bucket', cld);
       }
 
       selectedFiles.forEach(f => {

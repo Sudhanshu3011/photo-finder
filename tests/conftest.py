@@ -32,8 +32,9 @@ def create_mock_jpeg(width: int = 120, height: int = 120) -> bytes:
 async def mock_get_verified_keys():
     """Mock credentials provider for tests."""
     return {
-        "cloudinary_url": "cloudinary://123:abc@test",
-        "cloudinary_creds": {"cloud_name": "test", "api_key": "123", "api_secret": "abc"},
+        "storage_bucket": "test-bucket",
+        "s3_bucket": "test-bucket",
+        "storage_type": "s3",
     }
 
 
@@ -57,7 +58,7 @@ def mock_require_current_user(request: Request):
                 "username": "testuser",
                 "email": "testuser@example.com",
                 "role": "admin",
-                "cloudinary_url": "cloudinary://123:abc@test",
+                "storage_bucket": "test-bucket",
             }
     # Enforce strict 401 on /api/auth/me if unauthenticated
     if request.url.path == "/api/auth/me":
@@ -72,7 +73,7 @@ def mock_require_current_user(request: Request):
         "username": "testuser",
         "email": "testuser@example.com",
         "role": "admin",
-        "cloudinary_url": "cloudinary://123:abc@test",
+        "storage_bucket": "test-bucket",
     }
 
 

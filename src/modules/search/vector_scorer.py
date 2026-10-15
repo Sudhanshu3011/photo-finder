@@ -18,6 +18,7 @@ from src.core.config import (
     FACE_BLUR_THRESHOLD,
 )
 from src.core.logging import log
+from src.modules.storage.s3_storage import build_s3_url
 
 
 def score_face_matches(
@@ -50,7 +51,7 @@ def score_face_matches(
         if not cloud_url and img_id:
             pid = img_id if img_id.startswith("img_") else f"img_{img_id}"
             fld = meta.get("folder") or "general"
-            cloud_url = f"https://res.cloudinary.com/ks28qusz/image/upload/{fld}/{pid}.jpg"
+            cloud_url = build_s3_url(key=f"{fld}/{pid}.jpg")
             meta["url"] = cloud_url
 
         scored.append({
@@ -85,7 +86,7 @@ def score_object_matches(
         if not cloud_url and img_id:
             pid = img_id if str(img_id).startswith("img_") else f"img_{img_id}"
             fld = meta.get("folder") or "general"
-            cloud_url = f"https://res.cloudinary.com/ks28qusz/image/upload/{fld}/{pid}.jpg"
+            cloud_url = build_s3_url(key=f"{fld}/{pid}.jpg")
             meta["url"] = cloud_url
 
         scored.append({

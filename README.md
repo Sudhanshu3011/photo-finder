@@ -43,9 +43,9 @@ Comprehensive architectural blueprints and technical references are maintained i
 - **Dual-Model Face Scoring**: Combines **ArcFace** (angular discriminative margin) and **AdaFace** (adaptive image-quality margin) into a composite similarity score ($0.60 \cdot \text{ArcFace} + 0.40 \cdot \text{AdaFace}$) to maximize recall under challenging lighting and blur.
 - **Multi-Angle Composite Search**: Fuses Frontal, Left Profile, and Right Profile face images into a single composite representation for robust multi-pose gallery matching.
 - **Automated Zero-Shot Fallback**: If an image contains no human faces, the pipeline automatically routes to **DINOv2 (ViT-B/14) + SigLIP (SO400M)** 1536D fused vectors for object and scene search.
-- **Unsupervised Face Identity Clustering (HDBSCAN)**: Automatically clusters unlabelled photos into people albums, excludes outlier noise (`-1`), and identifies the optimal representative **medoid photo** with Cloudinary CDN delivery.
-- **Asynchronous Background Queue**: Ingestion of large image batches is queued asynchronously with real-time log polling, concurrency semaphores, and worker state machines.
-- **Zero Heavy External Dependencies**: No external Redis or Pinecone required. Everything persists locally in SQLite and native FAISS indexes, with Cloudinary CDN integration for media hosting.
+- **Unsupervised Face Identity Clustering (HDBSCAN)**: Automatically clusters unlabelled photos into people albums, excludes outlier noise (`-1`), and identifies the optimal representative **medoid photo** with AWS S3 delivery.
+- **Asynchronous Background Queue**: Ingestion of large image batches is queued asynchronously with real-time log polling, Celery worker fleet, and distributed state machines.
+- **Production-Ready Multi-Tenant Architecture**: Multi-tenancy isolation across PostgreSQL (RLS), Redis distributed cache, tenant-partitioned FAISS vector indexes, and AWS S3 object storage.
 
 ---
 
@@ -65,7 +65,7 @@ flowchart TD
 
     subgraph CoreServices ["Core Services Layer"]
         UploadSvc["PhotoUploadService"]
-        JobQueue["Async Job Queue (jobs.py)"]
+        JobQueue["Distributed Celery Queue (celery_app.py)"]
         ProcSvc["ImageProcessingService"]
         SearchSvc["ImageSearchService"]
         AIMgr["AIModelManager (Singleton)"]
@@ -82,9 +82,9 @@ flowchart TD
     end
 
     subgraph Storage ["Storage & Indexing Layer"]
-        FAISS["FAISS Vector Storage (data/faiss/*.index)"]
-        SQLite["SQLite (data/local_storage.db)"]
-        Cloudinary["Cloudinary CDN (Remote Media Storage)"]
+        FAISS["FAISS Vector Storage (data/faiss/{tenant_id}/*.index)"]
+        Postgres["PostgreSQL Database (Multi-Tenant RLS)"]
+        AWSS3["AWS S3 Bucket (Object Storage)"]
     end
 
     Client --> FastAPI
@@ -143,11 +143,15 @@ MKL_NUM_THREADS=2
 TOKENIZERS_PARALLELISM=false
 MAX_CONCURRENT_INFERENCES=2
 
-# Cloudinary CDN Credentials
-CLOUDINARY_URL=cloudinary://<api_key>:<api_secret>@<cloud_name>
+# AWS S3 Object Storage Configuration
+AWS_ACCESS_KEY_ID=your-aws-access-key-id
+AWS_SECRET_ACCESS_KEY=your-aws-secret-access-key
+AWS_REGION=us-east-1
+AWS_S3_BUCKET=visual-search-media
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/visual_search
+REDIS_URL=redis://localhost:6379/0
 
 # Local Storage Paths
-SQLITE_DB_PATH=data/local_storage.db
 FAISS_DATA_DIR=data/faiss
 
 # JWT Secret Key

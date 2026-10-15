@@ -6,12 +6,17 @@ from fastapi import UploadFile
 
 from src.modules.vision.image_quality import assess_image_quality
 from src.modules.storage.local_storage import save_image_bytes, get_image_path
-from src.modules.storage.s3_storage import upload_image_to_s3
-from src.modules.storage.cloudinary_storage import upload_image_to_cloudinary
+from src.modules.storage.s3_storage import upload_image_to_s3, list_s3_objects
 from src.modules.infra.postgres_repository import get_repository
 from src.modules.infra.kv_cache import get_kv_cache
+from src.common.utils import fetch_image_bytes_from_url
+
+from celery import chord, chain
+from src.tasks.ingest_tasks import task_process_image_upload, task_batch_completion_callback
+from src.tasks.inference_tasks import task_extract_embeddings
 
 logger = logging.getLogger("src.services.photo_upload_service")
+
 
 class PhotoUploadService:
     """Orchestrator for photo upload, validation, persistence, and ingestion."""
@@ -27,13 +32,12 @@ class PhotoUploadService:
         folder_name: str = "general",
         user_id: Optional[str] = None,
         save_to_cloud: bool = True,
-        cloudinary_creds: Optional[dict] = None,
         tenant_id: Optional[str] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """
         Validate, save, and record a single photo from an uploaded file or remote URL.
-        Associates photo with the specified folder_name on Cloudinary and in metadata.
+        Associates photo with the specified folder_name in S3 and metadata.
         """
         image_id = f"img_{uuid.uuid4().hex[:12]}"
         filename = "uploaded_image.jpg"
@@ -42,7 +46,6 @@ class PhotoUploadService:
             filename = file.filename or "uploaded_image.jpg"
             contents = await file.read()
         elif image_url:
-            from src.common.utils import fetch_image_bytes_from_url
             filename = image_url.split("/")[-1].split("?")[0] or "remote_image.jpg"
             try:
                 contents = await fetch_image_bytes_from_url(image_url)
@@ -95,7 +98,7 @@ class PhotoUploadService:
         # 3. Cloud Object Storage (AWS S3)
         cloud_url = None
         if save_to_cloud:
-            if image_url and ("s3.amazonaws.com" in image_url or "s3." in image_url or "cloudinary.com" in image_url):
+            if image_url and ("s3.amazonaws.com" in image_url or "s3." in image_url):
                 cloud_url = image_url
             else:
                 try:
@@ -190,35 +193,102 @@ class PhotoUploadService:
             "items": items
         }
 
-    async def sync_from_cloudinary_folder(
+    async def dispatch_batch_celery(
+        self,
+        files: List[UploadFile],
+        folder_name: str = "general",
+        user_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Dispatches batch photo upload to Celery worker fleet via chord.
+        Returns job_id and status: 'queued' within < 15ms.
+        """
+        tid = tenant_id or "default"
+        job_id = f"job_{uuid.uuid4().hex[:12]}"
+        total = len(files)
+        logger.info("[photo_upload_service.dispatch_batch_celery] Enqueueing batch job %s with %d files", job_id, total)
+
+        self.repo.create_job(job_id=job_id, total_images=total, user_id=user_id or "anonymous", folder=folder_name, tenant_id=tid)
+
+        # Initialize atomic multi-counter state in Redis
+        initial_job_data = {
+            "job_id": job_id,
+            "tenant_id": tid,
+            "user_id": user_id or "anonymous",
+            "folder": folder_name,
+            "status": "pending",
+            "current_stage": "queued",
+            "total_files": total,
+            "processed_files": 0,
+            "successful_files": 0,
+            "duplicate_files": 0,
+            "failed_files": 0,
+            "logs": [f"Batch job {job_id} queued with {total} items across worker fleet"],
+        }
+        self.cache.set(f"job:{tid}:{job_id}", initial_job_data)
+        self.cache.set(f"job:{job_id}", initial_job_data)
+
+        pipelines = []
+        for file in files:
+            img_id = uuid.uuid4().hex
+            contents = await file.read()
+            pipeline = chain(
+                task_process_image_upload.s(
+                    file_bytes_or_path=contents,
+                    folder_name=folder_name,
+                    user_id=user_id or "anonymous",
+                    tenant_id=tid,
+                    image_id=img_id,
+                    filename=file.filename or f"{img_id}.jpg",
+                    job_id=job_id,
+                ),
+                task_extract_embeddings.s(),
+            )
+            pipelines.append(pipeline)
+
+        task_chord = chord(
+            pipelines,
+            task_batch_completion_callback.s(job_id=job_id, tenant_id=tid, folder_name=folder_name)
+        )
+        task_chord.apply_async()
+
+        return {
+            "job_id": job_id,
+            "status": "queued",
+            "total": total,
+            "tenant_id": tid,
+        }
+
+
+    async def sync_from_s3_prefix(
         self,
         folder_name: str,
         user_id: Optional[str] = None,
-        cloudinary_creds: Optional[dict] = None,
+        bucket: Optional[str] = None,
+        tenant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Ingest all image assets from an existing Cloudinary folder.
+        Ingest all image assets from an existing AWS S3 prefix / folder.
         """
-        from src.modules.storage.cloudinary_storage import list_folder_images
-        logger.info("[photo_upload_service.sync_from_cloudinary_folder] Syncing folder '%s'", folder_name)
+        logger.info("[photo_upload_service.sync_from_s3_prefix] Syncing prefix '%s'", folder_name)
 
-        creds = cloudinary_creds or {}
-        resources_res = list_folder_images(folder=folder_name, creds=creds)
-        resources = resources_res.get("resources", [])
+        resources = list_s3_objects(prefix=folder_name, bucket=bucket)
 
         items = []
         synced = 0
         failed = 0
 
         for r in resources:
-            sec_url = r.get("secure_url") or r.get("url")
+            sec_url = r.get("url")
             if not sec_url:
                 continue
             res = await self.ingest_single_photo(
                 image_url=sec_url,
                 folder_name=folder_name,
                 user_id=user_id,
-                save_to_cloud=False,  # Already hosted on Cloudinary
+                save_to_cloud=False,  # Already hosted on S3
+                tenant_id=tenant_id,
             )
             items.append(res)
             if res.get("status") == "success":
@@ -233,6 +303,15 @@ class PhotoUploadService:
             "failed": failed,
             "items": items,
         }
+
+    async def sync_from_cloudinary_folder(
+        self,
+        folder_name: str,
+        user_id: Optional[str] = None,
+        cloudinary_creds: Optional[dict] = None,
+    ) -> Dict[str, Any]:
+        """Backward compatibility alias for S3 prefix sync."""
+        return await self.sync_from_s3_prefix(folder_name=folder_name, user_id=user_id)
 
 
 _photo_upload_service_instance: Optional[PhotoUploadService] = None

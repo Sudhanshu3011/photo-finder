@@ -11,6 +11,7 @@ from src.modules.vision.face_detector import detect_faces
 from src.modules.vision.face_embedder import extract_face_embeddings
 from src.modules.infra.postgres_repository import sync_get_folder_image_count, sync_list_all_indexed_folders
 from src.common.utils import fetch_image_bytes_from_url
+from src.modules.storage.s3_storage import build_s3_url
 
 logger = logging.getLogger("src.api.search_routes")
 
@@ -21,8 +22,8 @@ router = APIRouter(prefix="/api/search", tags=["Visual & Face Search"])
 async def search_by_image(
     request: Request,
     file: Optional[UploadFile] = File(None, description="Query image file upload"),
-    image_url: Optional[str] = Form(None, description="Direct Cloudinary or image URL to query"),
-    folder_name: Optional[str] = Form(None, description="Restrict search to this Cloudinary folder/album"),
+    image_url: Optional[str] = Form(None, description="Direct S3 or image URL to query"),
+    folder_name: Optional[str] = Form(None, description="Restrict search to this folder/album"),
     top_k: int = Query(20, ge=1, le=30, description="Maximum number of matches to return"),
     threshold: float = Query(0.60, ge=0.0, le=1.0, description="Cosine similarity threshold"),
     service: ImageSearchService = Depends(get_image_search_service),
@@ -30,8 +31,8 @@ async def search_by_image(
     tenant_id: str = Depends(get_current_tenant_id),
 ):
     """
-    Search gallery using an input query image file or direct Cloudinary URL.
-    Optionally scopes/filters search to a specific Cloudinary folder.
+    Search gallery using an input query image file or direct image URL.
+    Optionally scopes/filters search to a specific folder/album.
     Automatically detects whether the query contains faces or objects.
     """
     contents = None
@@ -92,7 +93,7 @@ async def search_by_image(
         if not c_url and img_id:
             pid = img_id if img_id.startswith("img_") else f"img_{img_id}"
             fld = target_folder or meta.get("folder") or "general"
-            c_url = f"https://res.cloudinary.com/ks28qusz/image/upload/{fld}/{pid}.jpg"
+            c_url = build_s3_url(key=f"{fld}/{pid}.jpg")
         meta["url"] = c_url
 
         matches.append(
@@ -124,7 +125,7 @@ async def search_by_multi_angle(
     front_url: Optional[str] = Form(None, description="Frontal face image URL"),
     left_url: Optional[str] = Form(None, description="Optional left face image URL"),
     right_url: Optional[str] = Form(None, description="Optional right face image URL"),
-    folder_name: Optional[str] = Form(None, description="Restrict search to this Cloudinary folder/album"),
+    folder_name: Optional[str] = Form(None, description="Restrict search to this folder/album"),
     top_k: int = Query(20, ge=1, le=30),
     threshold: float = Query(0.60, ge=0.0, le=1.0),
     service: ImageSearchService = Depends(get_image_search_service),
@@ -133,7 +134,7 @@ async def search_by_multi_angle(
 ):
     """
     Search faces using multiple perspective angles (front, left, right).
-    Accepts files or Cloudinary URLs. Fuses embeddings into a composite representation.
+    Accepts files or image URLs. Fuses embeddings into a composite representation.
     """
     target_folder = (folder_name or request.query_params.get("folder_name") or request.query_params.get("folder") or "").strip()
 
@@ -206,7 +207,7 @@ async def search_by_multi_angle(
         if not c_url and img_id:
             pid = img_id if img_id.startswith("img_") else f"img_{img_id}"
             fld = target_folder or meta.get("folder") or "general"
-            c_url = f"https://res.cloudinary.com/ks28qusz/image/upload/{fld}/{pid}.jpg"
+            c_url = build_s3_url(key=f"{fld}/{pid}.jpg")
         meta["url"] = c_url
 
         matches.append(
