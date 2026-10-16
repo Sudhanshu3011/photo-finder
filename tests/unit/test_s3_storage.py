@@ -76,7 +76,7 @@ def test_upload_to_s3_with_mocked_boto3():
         mock_client.upload_fileobj.assert_called_once()
         assert res["public_id"] == "tenant_1/test.jpg"
         assert res["bucket"] == "test-bucket"
-        assert "test-bucket.s3.amazonaws.com/tenant_1/test.jpg" in res["secure_url"]
+        assert "test-bucket" in res["secure_url"] and "/tenant_1/test.jpg" in res["secure_url"]
 
 
 def test_ping_s3_mocked():

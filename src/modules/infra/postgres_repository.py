@@ -4,7 +4,6 @@ Replaces legacy SQLite with PostgreSQL async connection pooling (asyncpg) and ke
 Provides zero-dependency in-memory fallback for local offline unit testing when PostgreSQL is not running.
 """
 import asyncio
-import concurrent.futures
 import json
 import logging
 import os
@@ -79,20 +78,43 @@ async def get_tenant_connection(tenant_id: str) -> AsyncGenerator[Any, None]:
             yield conn
 
 
+@asynccontextmanager
+async def get_bypass_rls_connection() -> AsyncGenerator[Any, None]:
+    """
+    Acquire a connection from the pool and bypass PostgreSQL Row-Level Security (RLS)
+    strictly for pre-auth lookup (login by email, invite token lookup).
+    """
+    pool = await get_postgres_pool()
+    if not pool:
+        raise RuntimeError("PostgreSQL connection pool is not available")
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT set_config('app.bypass_rls', 'on', true)")
+            yield conn
+
+
 async def init_postgres_tables() -> None:
-    """Initialize PostgreSQL tables, composite indexes, and RLS policies."""
+    """Initialize PostgreSQL tables, composite indexes, triggers, and RLS policies."""
     pool = await get_postgres_pool()
     if not pool:
         return
 
     async with pool.acquire() as conn:
         async with conn.transaction():
+            # 1. Base Tables
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS tenants (
                     tenant_id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    storage_bucket TEXT,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
+                ALTER TABLE tenants ADD COLUMN IF NOT EXISTS storage_bucket TEXT;
+                ALTER TABLE tenants ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+                ALTER TABLE tenants ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
                 CREATE TABLE IF NOT EXISTS users (
                     user_id TEXT PRIMARY KEY,
@@ -100,13 +122,83 @@ async def init_postgres_tables() -> None:
                     username TEXT,
                     email TEXT,
                     hashed_password TEXT,
-                    role TEXT DEFAULT 'user',
-                    cloudinary_url TEXT,
+                    role TEXT DEFAULT 'viewer',
+                    storage_bucket TEXT,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS storage_bucket TEXT;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+                ALTER TABLE users DROP CONSTRAINT IF EXISTS uq_global_email;
+                ALTER TABLE users DROP CONSTRAINT IF EXISTS uq_users_email;
+                ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_key;
+                DO $$ BEGIN
+                    ALTER TABLE users ADD CONSTRAINT uq_tenant_email UNIQUE (tenant_id, email);
+                EXCEPTION WHEN duplicate_table OR duplicate_object THEN NULL; END $$;
+                DO $$ BEGIN
+                    ALTER TABLE users ADD CONSTRAINT uq_tenant_username UNIQUE (tenant_id, username);
+                EXCEPTION WHEN duplicate_table OR duplicate_object THEN NULL; END $$;
                 CREATE INDEX IF NOT EXISTS idx_pg_users_tenant ON users(tenant_id);
                 CREATE INDEX IF NOT EXISTS idx_pg_users_email ON users(tenant_id, email);
+                CREATE INDEX IF NOT EXISTS idx_pg_users_email_global ON users(LOWER(email)) WHERE is_active = TRUE;
+                CREATE INDEX IF NOT EXISTS idx_pg_users_role ON users(tenant_id, role);
+
+                CREATE TABLE IF NOT EXISTS folders (
+                    folder_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    folder_name TEXT NOT NULL,
+                    description TEXT,
+                    visibility TEXT NOT NULL DEFAULT 'restricted',
+                    photo_count INT NOT NULL DEFAULT 0,
+                    created_by TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    CONSTRAINT uq_tenant_folder_name UNIQUE (tenant_id, folder_name)
+                );
+                CREATE INDEX IF NOT EXISTS idx_pg_folders_tenant_vis ON folders(tenant_id, visibility);
+                CREATE INDEX IF NOT EXISTS idx_pg_folders_tenant_name ON folders(tenant_id, folder_name);
+
+                CREATE TABLE IF NOT EXISTS folder_user_access (
+                    folder_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    tenant_id TEXT NOT NULL,
+                    access_level TEXT NOT NULL DEFAULT 'inherit',
+                    granted_by TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (folder_id, user_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_pg_fua_lookup ON folder_user_access(tenant_id, user_id, folder_id);
+
+                CREATE TABLE IF NOT EXISTS tenant_invites (
+                    invite_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    email TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'viewer',
+                    initial_folder_ids TEXT[] NOT NULL DEFAULT '{}',
+                    initial_access_level TEXT NOT NULL DEFAULT 'inherit',
+                    invited_by TEXT,
+                    invite_token TEXT UNIQUE NOT NULL,
+                    expires_at TIMESTAMPTZ NOT NULL,
+                    accepted_at TIMESTAMPTZ,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_pg_invites_token ON tenant_invites(invite_token);
+                CREATE INDEX IF NOT EXISTS idx_pg_invites_tenant_email ON tenant_invites(tenant_id, email);
+
+                CREATE TABLE IF NOT EXISTS photos (
+                    image_id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    folder_id TEXT NOT NULL,
+                    storage_key TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    uploaded_by TEXT,
+                    faiss_id BIGINT UNIQUE,
+                    metadata JSONB DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                CREATE INDEX IF NOT EXISTS idx_pg_photos_tenant_folder ON photos(tenant_id, folder_id);
+                CREATE INDEX IF NOT EXISTS idx_pg_photos_faiss ON photos(tenant_id, faiss_id);
 
                 CREATE TABLE IF NOT EXISTS upload_jobs (
                     job_id TEXT PRIMARY KEY,
@@ -137,16 +229,6 @@ async def init_postgres_tables() -> None:
                 );
                 CREATE INDEX IF NOT EXISTS idx_pg_clusters_tenant ON face_clusters(tenant_id, folder);
 
-                CREATE TABLE IF NOT EXISTS face_vector_clusters (
-                    vector_id TEXT PRIMARY KEY,
-                    tenant_id TEXT NOT NULL DEFAULT 'default',
-                    user_id TEXT NOT NULL,
-                    cluster_id TEXT NOT NULL,
-                    image_url TEXT,
-                    folder TEXT
-                );
-                CREATE INDEX IF NOT EXISTS idx_pg_fvc_tenant ON face_vector_clusters(tenant_id, cluster_id);
-
                 CREATE TABLE IF NOT EXISTS vector_metadata (
                     int_id BIGSERIAL PRIMARY KEY,
                     tenant_id TEXT NOT NULL DEFAULT 'default',
@@ -162,8 +244,33 @@ async def init_postgres_tables() -> None:
                 CREATE INDEX IF NOT EXISTS idx_pg_vm_tenant_url ON vector_metadata(tenant_id, url);
             """)
 
-            # Apply Row-Level Security (RLS) Policies
-            for table in ["vector_metadata", "face_clusters", "face_vector_clusters", "upload_jobs"]:
+            # 2. Trigger for atomic folder photo count
+            await conn.execute("""
+                CREATE OR REPLACE FUNCTION update_folder_photo_count()
+                RETURNS TRIGGER AS $$
+                BEGIN
+                    IF TG_OP = 'INSERT' THEN
+                        UPDATE folders SET photo_count = photo_count + 1, updated_at = NOW() WHERE folder_id = NEW.folder_id;
+                    ELSIF TG_OP = 'DELETE' THEN
+                        UPDATE folders SET photo_count = GREATEST(0, photo_count - 1), updated_at = NOW() WHERE folder_id = OLD.folder_id;
+                    END IF;
+                    RETURN NULL;
+                END;
+                $$ LANGUAGE plpgsql;
+
+                DROP TRIGGER IF EXISTS trg_photos_count ON photos;
+                CREATE TRIGGER trg_photos_count
+                AFTER INSERT OR DELETE ON photos
+                FOR EACH ROW EXECUTE FUNCTION update_folder_photo_count();
+            """)
+
+            # 3. Apply Row-Level Security (RLS) Policies
+            # Standard isolated tables
+            standard_tables = [
+                "vector_metadata", "face_clusters",
+                "upload_jobs", "folders", "folder_user_access", "photos"
+            ]
+            for table in standard_tables:
                 await conn.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;")
                 await conn.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY;")
                 policy_name = f"tenant_isolation_{table}"
@@ -183,18 +290,57 @@ async def init_postgres_tables() -> None:
                     $$;
                 """)
 
-            logger.info("PostgreSQL tables and Row-Level Security policies active")
+            # Pre-auth bypass tables (users, tenant_invites, tenants)
+            bypass_tables = ["users", "tenant_invites", "tenants"]
+            for table in bypass_tables:
+                await conn.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;")
+                await conn.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY;")
+                policy_name = f"tenant_bypass_isolation_{table}"
+                await conn.execute(f"""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM pg_policies 
+                            WHERE tablename = '{table}' AND policyname = '{policy_name}'
+                        ) THEN
+                            CREATE POLICY {policy_name} ON {table}
+                                FOR ALL
+                                USING (
+                                    tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')
+                                    OR current_setting('app.bypass_rls', true) = 'on'
+                                )
+                                WITH CHECK (
+                                    tenant_id = NULLIF(current_setting('app.current_tenant_id', true), '')
+                                    OR current_setting('app.bypass_rls', true) = 'on'
+                                );
+                        END IF;
+                    END
+                    $$;
+                """)
+
+            logger.info("PostgreSQL tables, triggers, and Row-Level Security policies active")
+
+
+_bg_loop: Optional[asyncio.AbstractEventLoop] = None
+_bg_thread: Optional[threading.Thread] = None
+_bg_lock = threading.Lock()
+
+
+def _get_bg_loop() -> asyncio.AbstractEventLoop:
+    global _bg_loop, _bg_thread
+    with _bg_lock:
+        if _bg_loop is None or not _bg_loop.is_running():
+            _bg_loop = asyncio.new_event_loop()
+            _bg_thread = threading.Thread(target=_bg_loop.run_forever, daemon=True)
+            _bg_thread.start()
+        return _bg_loop
 
 
 def _run_sync(coro):
-    """Safely execute an asynchronous coroutine from synchronous contexts."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        return executor.submit(asyncio.run, coro).result()
+    """Safely execute an asynchronous coroutine in the persistent background event loop."""
+    loop = _get_bg_loop()
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result()
 
 
 # ===============================================================
@@ -204,9 +350,36 @@ _mem_lock = threading.RLock()
 _mem_users: Dict[str, dict] = {}           # user_id -> dict
 _mem_jobs: Dict[str, dict] = {}            # job_id -> dict
 _mem_clusters: Dict[str, dict] = {}        # cluster_id -> dict
-_mem_vector_clusters: Dict[str, dict] = {} # vector_id -> dict
 _mem_vector_metadata: Dict[int, dict] = {} # int_id -> dict
 _mem_int_counter: int = 1
+
+# Multi-Tenant & RBAC in-memory fallback state
+_mem_tenants: Dict[str, dict] = {
+    "default": {
+        "tenant_id": "default",
+        "name": "Default Organization",
+        "storage_bucket": "visual-search-media",
+        "is_active": True,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+}
+_mem_folders: Dict[str, dict] = {
+    "default": {
+        "folder_id": "default",
+        "tenant_id": "default",
+        "folder_name": "general",
+        "description": "Default general album",
+        "visibility": "tenant_wide",
+        "photo_count": 0,
+        "created_by": None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+}
+_mem_folder_access: Dict[Tuple[str, str], dict] = {} # (folder_id, user_id) -> dict
+_mem_invites: Dict[str, dict] = {}                  # invite_id / invite_token -> dict
+_mem_photos: Dict[str, dict] = {}                   # image_id -> dict
 
 
 # ===============================================================
@@ -255,71 +428,6 @@ async def get_user_by_id(user_id: str, tenant_id: Optional[str] = None) -> Optio
     with _mem_lock:
         user = _mem_users.get(user_id)
         return dict(user) if user else None
-
-
-async def get_user_by_email(email: str, tenant_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Retrieve user record by email."""
-    tid = (tenant_id or get_current_tenant_id()).strip()
-    clean_email = email.strip().lower()
-    pool = await get_postgres_pool()
-    if pool:
-        async with get_tenant_connection(tid) as conn:
-            row = await conn.fetchrow("SELECT * FROM users WHERE LOWER(email) = $1", clean_email)
-            return dict(row) if row else None
-
-    with _mem_lock:
-        for u in _mem_users.values():
-            if (u.get("email") or "").lower() == clean_email:
-                return dict(u)
-        return None
-
-
-async def create_user_record(
-    username: str,
-    email: str,
-    hashed_password: str,
-    role: str = "user",
-    tenant_id: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Create a new registered user in PostgreSQL."""
-    user_id = str(uuid.uuid4())
-    tid = (tenant_id or get_current_tenant_id()).strip()
-    clean_email = email.strip().lower()
-    now_dt = datetime.now(timezone.utc)
-    now_str = now_dt.isoformat()
-
-    pool = await get_postgres_pool()
-    if pool:
-        async with get_tenant_connection(tid) as conn:
-            await conn.execute(
-                """
-                INSERT INTO users (user_id, tenant_id, username, email, hashed_password, role, created_at, last_seen)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
-                """,
-                user_id, tid, username.strip(), clean_email, hashed_password, role, now_dt
-            )
-        return {
-            "user_id": user_id,
-            "tenant_id": tid,
-            "username": username.strip(),
-            "email": clean_email,
-            "role": role,
-            "created_at": now_str,
-        }
-
-    with _mem_lock:
-        record = {
-            "user_id": user_id,
-            "tenant_id": tid,
-            "username": username.strip(),
-            "email": clean_email,
-            "hashed_password": hashed_password,
-            "role": role,
-            "created_at": now_str,
-            "last_seen": now_str,
-        }
-        _mem_users[user_id] = record
-        return record
 
 
 # ===============================================================
@@ -413,17 +521,20 @@ async def db_get_job(job_id: str, tenant_id: Optional[str] = None) -> Optional[d
     if pool:
         async with get_tenant_connection(tid) as conn:
             row = await conn.fetchrow("SELECT * FROM upload_jobs WHERE job_id = $1", job_id)
-            if not row:
-                return None
-            res = dict(row)
-            if isinstance(res.get("logs"), str):
-                try:
-                    res["logs"] = json.loads(res["logs"])
-                except Exception:
-                    res["logs"] = []
-            elif res.get("logs") is None:
+        if not row:
+            async with get_bypass_rls_connection() as bypass_conn:
+                row = await bypass_conn.fetchrow("SELECT * FROM upload_jobs WHERE job_id = $1", job_id)
+        if not row:
+            return None
+        res = dict(row)
+        if isinstance(res.get("logs"), str):
+            try:
+                res["logs"] = json.loads(res["logs"])
+            except Exception:
                 res["logs"] = []
-            return res
+        elif res.get("logs") is None:
+            res["logs"] = []
+        return res
 
     with _mem_lock:
         job = _mem_jobs.get(job_id)
@@ -502,88 +613,6 @@ async def db_upsert_cluster(
             "face_count": face_count,
             "updated_at": now_dt.isoformat(),
         }
-
-
-async def db_upsert_vector_clusters(rows: List[dict], tenant_id: Optional[str] = None) -> None:
-    """Bulk upsert mapping of vector_ids to cluster_ids."""
-    if not rows:
-        return
-    tid = (tenant_id or get_current_tenant_id()).strip()
-    pool = await get_postgres_pool()
-    if pool:
-        async with get_tenant_connection(tid) as conn:
-            for r in rows:
-                await conn.execute(
-                    """
-                    INSERT INTO face_vector_clusters (vector_id, tenant_id, user_id, cluster_id, image_url, folder)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT(vector_id) DO UPDATE SET
-                        cluster_id = EXCLUDED.cluster_id,
-                        image_url = EXCLUDED.image_url,
-                        folder = EXCLUDED.folder
-                    """,
-                    r["vector_id"], tid, r.get("user_id", "system"), r["cluster_id"], r.get("image_url"), r.get("folder")
-                )
-        return
-
-    with _mem_lock:
-        for r in rows:
-            _mem_vector_clusters[r["vector_id"]] = dict(r)
-            _mem_vector_clusters[r["vector_id"]]["tenant_id"] = tid
-
-
-async def db_get_clusters_for_user(user_id: str, tenant_id: Optional[str] = None) -> List[dict]:
-    """Retrieve all face clusters for a user ordered by face count descending."""
-    tid = (tenant_id or get_current_tenant_id()).strip()
-    pool = await get_postgres_pool()
-    if pool:
-        async with get_tenant_connection(tid) as conn:
-            rows = await conn.fetch(
-                """
-                SELECT cluster_id, person_name, representative_face_url, face_count, updated_at
-                FROM face_clusters
-                WHERE user_id = $1
-                ORDER BY face_count DESC
-                """,
-                user_id
-            )
-            return [dict(r) for r in rows]
-
-    with _mem_lock:
-        results = [
-            c for c in _mem_clusters.values()
-            if c.get("tenant_id") == tid and (c.get("user_id") == user_id or c.get("user_id") == "system")
-        ]
-        results.sort(key=lambda x: x.get("face_count", 0), reverse=True)
-        return results
-
-
-async def db_get_cluster_images(cluster_id: str, user_id: str, tenant_id: Optional[str] = None) -> List[dict]:
-    """Retrieve all distinct images associated with a specific cluster."""
-    tid = (tenant_id or get_current_tenant_id()).strip()
-    pool = await get_postgres_pool()
-    if pool:
-        async with get_tenant_connection(tid) as conn:
-            rows = await conn.fetch(
-                """
-                SELECT DISTINCT image_url, folder
-                FROM face_vector_clusters
-                WHERE cluster_id = $1 AND user_id = $2 AND image_url IS NOT NULL
-                """,
-                cluster_id, user_id
-            )
-            return [dict(r) for r in rows]
-
-    with _mem_lock:
-        results = []
-        seen = set()
-        for v in _mem_vector_clusters.values():
-            if v.get("tenant_id") == tid and v.get("cluster_id") == cluster_id and v.get("user_id") == user_id:
-                url = v.get("image_url")
-                if url and url not in seen:
-                    seen.add(url)
-                    results.append({"image_url": url, "folder": v.get("folder")})
-        return results
 
 
 async def db_rename_cluster(cluster_id: str, new_name: str, user_id: str, tenant_id: Optional[str] = None) -> bool:
@@ -951,25 +980,6 @@ class PostgresRepository:
     def __init__(self):
         pass
 
-    def get_user_by_username(self, username: str, tenant_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        tid = (tenant_id or get_current_tenant_id()).strip()
-        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
-        if pool:
-            async def _get():
-                async with get_tenant_connection(tid) as conn:
-                    row = await conn.fetchrow("SELECT * FROM users WHERE username = $1", username)
-                    return dict(row) if row else None
-            return _run_sync(_get())
-
-        with _mem_lock:
-            for u in _mem_users.values():
-                if u.get("tenant_id") == tid and u.get("username") == username:
-                    return dict(u)
-            return None
-
-    def get_user_by_email(self, email: str, tenant_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        return _run_sync(get_user_by_email(email, tenant_id=tenant_id))
-
     def get_user_by_id(self, user_id: str, tenant_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         return _run_sync(get_user_by_id(user_id, tenant_id=tenant_id))
 
@@ -980,7 +990,7 @@ class PostgresRepository:
         email: str,
         hashed_password: str,
         role: str = "user",
-        cloudinary_url: Optional[str] = None,
+        storage_bucket: Optional[str] = None,
         tenant_id: str = "default",
     ) -> bool:
         tid = (tenant_id or get_current_tenant_id()).strip()
@@ -994,10 +1004,10 @@ class PostgresRepository:
                     async with get_tenant_connection(tid) as conn:
                         await conn.execute(
                             """
-                            INSERT INTO users (user_id, tenant_id, username, email, hashed_password, role, cloudinary_url, created_at, last_seen)
+                            INSERT INTO users (user_id, tenant_id, username, email, hashed_password, role, storage_bucket, created_at, last_seen)
                             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
                             """,
-                            user_id, tid, username.strip(), clean_email, hashed_password, role, cloudinary_url, now_dt
+                            user_id, tid, username.strip(), clean_email, hashed_password, role, storage_bucket, now_dt
                         )
                     return True
                 except Exception as e:
@@ -1013,13 +1023,13 @@ class PostgresRepository:
                 "email": clean_email,
                 "hashed_password": hashed_password,
                 "role": role,
-                "cloudinary_url": cloudinary_url,
+                "storage_bucket": storage_bucket,
                 "created_at": now_dt.isoformat(),
                 "last_seen": now_dt.isoformat(),
             }
             return True
 
-    def update_user_cloudinary_url(self, user_id: str, cloudinary_url: str, tenant_id: Optional[str] = None) -> bool:
+    def update_user_storage_bucket(self, user_id: str, storage_bucket: str, tenant_id: Optional[str] = None) -> bool:
         tid = (tenant_id or get_current_tenant_id()).strip()
         now_dt = datetime.now(timezone.utc)
         pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
@@ -1028,15 +1038,15 @@ class PostgresRepository:
             async def _update():
                 async with get_tenant_connection(tid) as conn:
                     res = await conn.execute(
-                        "UPDATE users SET cloudinary_url = $1, last_seen = $2 WHERE user_id = $3",
-                        cloudinary_url, now_dt, user_id
+                        "UPDATE users SET storage_bucket = $1, last_seen = $2 WHERE user_id = $3",
+                        storage_bucket, now_dt, user_id
                     )
                     return "UPDATE 1" in res
             return _run_sync(_update())
 
         with _mem_lock:
             if user_id in _mem_users:
-                _mem_users[user_id]["cloudinary_url"] = cloudinary_url
+                _mem_users[user_id]["storage_bucket"] = storage_bucket
                 _mem_users[user_id]["last_seen"] = now_dt.isoformat()
                 return True
             return False
@@ -1175,7 +1185,7 @@ class PostgresRepository:
                         WHERE tenant_id = $1
                           AND (
                             metadata_json->>'sha256' = $2
-                            OR ($3 IS NOT NULL AND metadata_json->>'phash' = $3)
+                            OR ($3::text IS NOT NULL AND metadata_json->>'phash' = $3::text)
                           )
                         LIMIT 1
                         """,
@@ -1204,6 +1214,841 @@ class PostgresRepository:
                     if phash and item_phash and item_phash == phash:
                         return dict(item)
             return None
+
+    # ===============================================================
+    # Enterprise Multi-Tenant, RBAC & Folder ACL Operations
+    # ===============================================================
+
+    def create_tenant(self, tenant_id: str, name: str, storage_bucket: str = "visual-search-media") -> bool:
+        """Create or update a tenant organization record."""
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+        now_dt = datetime.now(timezone.utc)
+        if pool:
+            async def _create():
+                async with get_bypass_rls_connection() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO tenants (tenant_id, name, storage_bucket, is_active, created_at, updated_at)
+                        VALUES ($1, $2, $3, TRUE, $4, $4)
+                        ON CONFLICT (tenant_id) DO UPDATE
+                        SET name = EXCLUDED.name, storage_bucket = EXCLUDED.storage_bucket, updated_at = EXCLUDED.updated_at
+                        """,
+                        tenant_id, name, storage_bucket, now_dt
+                    )
+                    return True
+            return _run_sync(_create())
+
+        with _mem_lock:
+            _mem_tenants[tenant_id] = {
+                "tenant_id": tenant_id,
+                "name": name,
+                "storage_bucket": storage_bucket,
+                "is_active": True,
+                "created_at": now_dt.isoformat(),
+                "updated_at": now_dt.isoformat(),
+            }
+            return True
+
+    def get_tenant_by_id(self, tenant_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve tenant details by ID."""
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+        if pool:
+            async def _get():
+                async with get_bypass_rls_connection() as conn:
+                    row = await conn.fetchrow("SELECT * FROM tenants WHERE tenant_id = $1", tenant_id)
+                    return dict(row) if row else None
+            return _run_sync(_get())
+
+        with _mem_lock:
+            return dict(_mem_tenants[tenant_id]) if tenant_id in _mem_tenants else None
+
+    def get_user_preauth(self, username_or_email: str) -> Optional[Dict[str, Any]]:
+        """
+        Bypasses RLS to fetch a user by email or username prior to authentication.
+        Solves Trap 1 (Chicken-and-Egg RLS Deadlock on login).
+        """
+        clean_key = username_or_email.strip().lower()
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+        if pool:
+            async def _get():
+                async with get_bypass_rls_connection() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT * FROM users WHERE LOWER(email) = $1 OR username = $2 LIMIT 1",
+                        clean_key, username_or_email.strip()
+                    )
+                    return dict(row) if row else None
+            return _run_sync(_get())
+
+        with _mem_lock:
+            for u in _mem_users.values():
+                if u.get("email", "").lower() == clean_key or u.get("username") == username_or_email.strip():
+                    return dict(u)
+            return None
+
+    def create_tenant_invite(
+        self,
+        invite_id: str,
+        tenant_id: str,
+        email: str,
+        role: str,
+        initial_folder_ids: List[str],
+        initial_access_level: str,
+        invited_by: str,
+        invite_token: str,
+        expires_at: datetime,
+    ) -> bool:
+        """Create a tenant invitation record with pre-assigned folder IDs."""
+        tid = tenant_id.strip()
+        clean_email = email.strip().lower()
+        now_dt = datetime.now(timezone.utc)
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+
+        if pool:
+            async def _create():
+                async with get_tenant_connection(tid) as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO tenant_invites (
+                            invite_id, tenant_id, email, role, initial_folder_ids,
+                            initial_access_level, invited_by, invite_token, expires_at, created_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                        """,
+                        invite_id, tid, clean_email, role, initial_folder_ids,
+                        initial_access_level, invited_by, invite_token, expires_at, now_dt
+                    )
+                    return True
+            return _run_sync(_create())
+
+        with _mem_lock:
+            _mem_invites[invite_token] = {
+                "invite_id": invite_id,
+                "tenant_id": tid,
+                "email": clean_email,
+                "role": role,
+                "initial_folder_ids": list(initial_folder_ids),
+                "initial_access_level": initial_access_level,
+                "invited_by": invited_by,
+                "invite_token": invite_token,
+                "expires_at": expires_at.isoformat(),
+                "accepted_at": None,
+                "created_at": now_dt.isoformat(),
+            }
+            return True
+
+    def get_invite_by_token(self, invite_token: str) -> Optional[Dict[str, Any]]:
+        """
+        Bypasses RLS to fetch a valid, unaccepted, non-expired invite record by token,
+        joined with tenants to provide organization_name and storage_bucket.
+        """
+        token = invite_token.strip()
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+
+        if pool:
+            async def _get():
+                async with get_bypass_rls_connection() as conn:
+                    row = await conn.fetchrow(
+                        """
+                        SELECT 
+                            ti.invite_id,
+                            ti.tenant_id,
+                            t.name AS organization_name,
+                            t.storage_bucket,
+                            ti.email,
+                            ti.role,
+                            ti.initial_folder_ids,
+                            ti.initial_access_level,
+                            ti.invited_by,
+                            ti.expires_at,
+                            ti.accepted_at
+                        FROM tenant_invites ti
+                        JOIN tenants t ON ti.tenant_id = t.tenant_id
+                        WHERE ti.invite_token = $1 AND ti.accepted_at IS NULL AND ti.expires_at > NOW()
+                        LIMIT 1
+                        """,
+                        token
+                    )
+                    return dict(row) if row else None
+            return _run_sync(_get())
+
+        with _mem_lock:
+            inv = _mem_invites.get(token)
+            if not inv or inv.get("accepted_at"):
+                return None
+            exp = datetime.fromisoformat(inv["expires_at"]) if isinstance(inv["expires_at"], str) else inv["expires_at"]
+            if exp < datetime.now(timezone.utc):
+                return None
+            res = dict(inv)
+            t = _mem_tenants.get(inv["tenant_id"], {})
+            res["organization_name"] = t.get("name", "Organization")
+            res["storage_bucket"] = t.get("storage_bucket", "visual-search-media")
+            return res
+
+    def get_active_invite_by_email(self, email: str) -> Optional[Dict[str, Any]]:
+        """
+        Checks if an email has an active pending unaccepted invite elsewhere to prevent orphan tenant creation.
+        """
+        clean_email = email.strip().lower()
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+
+        if pool:
+            async def _get():
+                async with get_bypass_rls_connection() as conn:
+                    row = await conn.fetchrow(
+                        """
+                        SELECT 
+                            ti.invite_id,
+                            ti.tenant_id,
+                            t.name AS organization_name,
+                            ti.role,
+                            ti.expires_at
+                        FROM tenant_invites ti
+                        JOIN tenants t ON ti.tenant_id = t.tenant_id
+                        WHERE LOWER(ti.email) = LOWER($1)
+                          AND ti.accepted_at IS NULL
+                          AND ti.expires_at > NOW()
+                        ORDER BY ti.created_at DESC
+                        LIMIT 1
+                        """,
+                        clean_email
+                    )
+                    return dict(row) if row else None
+            return _run_sync(_get())
+
+        with _mem_lock:
+            now_dt = datetime.now(timezone.utc)
+            for inv in _mem_invites.values():
+                if inv.get("email", "").lower() == clean_email and not inv.get("accepted_at"):
+                    exp = datetime.fromisoformat(inv["expires_at"]) if isinstance(inv["expires_at"], str) else inv["expires_at"]
+                    if exp > now_dt:
+                        res = dict(inv)
+                        t = _mem_tenants.get(inv["tenant_id"], {})
+                        res["organization_name"] = t.get("name", "Organization")
+                        return res
+            return None
+
+    def get_users_by_email_preauth(self, email: str) -> List[Dict[str, Any]]:
+        """
+        Pre-auth lookup returning all active accounts matching an email across tenants.
+        Enables multi-tenant login disambiguation.
+        """
+        clean_email = email.strip().lower()
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+
+        if pool:
+            async def _get():
+                async with get_bypass_rls_connection() as conn:
+                    rows = await conn.fetch(
+                        """
+                        SELECT 
+                            u.user_id,
+                            u.tenant_id,
+                            u.username,
+                            u.email,
+                            u.hashed_password,
+                            u.role,
+                            u.is_active,
+                            u.storage_bucket,
+                            u.created_at,
+                            u.last_seen,
+                            t.name AS organization_name
+                        FROM users u
+                        JOIN tenants t ON u.tenant_id = t.tenant_id
+                        WHERE LOWER(u.email) = LOWER($1) AND u.is_active = TRUE
+                        """,
+                        clean_email
+                    )
+                    return [dict(r) for r in rows]
+            return _run_sync(_get())
+
+        with _mem_lock:
+            results = []
+            for u in _mem_users.values():
+                if u.get("email", "").lower() == clean_email and u.get("is_active", True):
+                    rec = dict(u)
+                    t = _mem_tenants.get(u.get("tenant_id", ""), {})
+                    rec["organization_name"] = t.get("name", "Organization")
+                    results.append(rec)
+            return results
+
+    def get_user_by_tenant_and_email(self, tenant_id: str, email: str) -> Optional[Dict[str, Any]]:
+        """Fetch user scoped to specific tenant by email."""
+        tid = tenant_id.strip()
+        clean_email = email.strip().lower()
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+
+        if pool:
+            async def _get():
+                async with get_tenant_connection(tid) as conn:
+                    row = await conn.fetchrow(
+                        """
+                        SELECT u.*, t.name as organization_name 
+                        FROM users u
+                        JOIN tenants t ON u.tenant_id = t.tenant_id
+                        WHERE u.tenant_id = $1 AND LOWER(u.email) = LOWER($2) LIMIT 1
+                        """,
+                        tid, clean_email
+                    )
+                    return dict(row) if row else None
+            return _run_sync(_get())
+
+        with _mem_lock:
+            for u in _mem_users.values():
+                if u.get("tenant_id") == tid and u.get("email", "").lower() == clean_email:
+                    rec = dict(u)
+                    t = _mem_tenants.get(tid, {})
+                    rec["organization_name"] = t.get("name", "Organization")
+                    return rec
+            return None
+
+    def get_user_by_tenant_and_username(self, tenant_id: str, username: str) -> Optional[Dict[str, Any]]:
+        """Fetch user scoped to specific tenant by username."""
+        tid = tenant_id.strip()
+        clean_username = username.strip()
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+
+        if pool:
+            async def _get():
+                async with get_tenant_connection(tid) as conn:
+                    row = await conn.fetchrow(
+                        "SELECT * FROM users WHERE tenant_id = $1 AND username = $2 LIMIT 1",
+                        tid, clean_username
+                    )
+                    return dict(row) if row else None
+            return _run_sync(_get())
+
+        with _mem_lock:
+            for u in _mem_users.values():
+                if u.get("tenant_id") == tid and u.get("username") == clean_username:
+                    return dict(u)
+            return None
+
+    def mark_invite_accepted(self, invite_token: str) -> bool:
+        """Mark an invite token as consumed."""
+        token = invite_token.strip()
+        now_dt = datetime.now(timezone.utc)
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+
+        if pool:
+            async def _accept():
+                async with get_bypass_rls_connection() as conn:
+                    await conn.execute(
+                        "UPDATE tenant_invites SET accepted_at = $1 WHERE invite_token = $2",
+                        now_dt, token
+                    )
+                    return True
+            return _run_sync(_accept())
+
+        with _mem_lock:
+            if token in _mem_invites:
+                _mem_invites[token]["accepted_at"] = now_dt.isoformat()
+                return True
+            return False
+
+    def list_tenant_members(self, tenant_id: str, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
+        """List registered members in a tenant with pagination."""
+        tid = tenant_id.strip()
+        lim = max(1, min(limit, 200))
+        off = max(0, offset)
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+
+        if pool:
+            async def _list():
+                async with get_tenant_connection(tid) as conn:
+                    rows = await conn.fetch(
+                        """
+                        SELECT user_id, username, email, role, is_active, created_at, last_seen
+                        FROM users WHERE tenant_id = $1 ORDER BY created_at ASC
+                        LIMIT $2 OFFSET $3
+                        """,
+                        tid, lim, off
+                    )
+                    return [dict(r) for r in rows]
+            return _run_sync(_list())
+
+        with _mem_lock:
+            results = []
+            for u in _mem_users.values():
+                if u.get("tenant_id") == tid:
+                    results.append({
+                        "user_id": u["user_id"],
+                        "username": u.get("username", ""),
+                        "email": u.get("email", ""),
+                        "role": u.get("role", "viewer"),
+                        "is_active": u.get("is_active", True),
+                        "created_at": str(u.get("created_at", "")),
+                        "last_seen": str(u.get("last_seen", "")),
+                    })
+            results.sort(key=lambda x: x["created_at"])
+            return results[off:off + lim]
+
+    def update_tenant_member_role(self, tenant_id: str, user_id: str, role: str) -> bool:
+        """Update a member's Tier 1 tenant-wide role."""
+        tid = tenant_id.strip()
+        uid = user_id.strip()
+        now_dt = datetime.now(timezone.utc)
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+
+        if pool:
+            async def _update():
+                async with get_tenant_connection(tid) as conn:
+                    res = await conn.execute(
+                        "UPDATE users SET role = $1, last_seen = $2 WHERE tenant_id = $3 AND user_id = $4",
+                        role, now_dt, tid, uid
+                    )
+                    return "UPDATE 1" in res
+            return _run_sync(_update())
+
+        with _mem_lock:
+            if uid in _mem_users and _mem_users[uid].get("tenant_id") == tid:
+                _mem_users[uid]["role"] = role
+                _mem_users[uid]["last_seen"] = now_dt.isoformat()
+                return True
+            return False
+
+    def remove_tenant_member(self, tenant_id: str, user_id: str) -> bool:
+        """Remove a member from a tenant."""
+        tid = tenant_id.strip()
+        uid = user_id.strip()
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+
+        if pool:
+            async def _del():
+                async with get_tenant_connection(tid) as conn:
+                    res = await conn.execute(
+                        "DELETE FROM users WHERE tenant_id = $1 AND user_id = $2",
+                        tid, uid
+                    )
+                    return "DELETE 1" in res
+            return _run_sync(_del())
+
+        with _mem_lock:
+            if uid in _mem_users and _mem_users[uid].get("tenant_id") == tid:
+                del _mem_users[uid]
+                return True
+            return False
+
+    def create_folder(
+        self,
+        folder_id: Optional[str] = None,
+        tenant_id: str = "",
+        folder_name: str = "",
+        description: Optional[str] = None,
+        visibility: str = "restricted",
+        created_by: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Creates a new folder and atomically grants the creator 'manager' access level.
+        Prevents the Orphaned Folder Creator Bug.
+        """
+        fid = (folder_id or f"fld_{uuid.uuid4().hex[:12]}").strip()
+        tid = tenant_id.strip()
+        now_dt = datetime.now(timezone.utc)
+        clean_name = folder_name.strip()
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+
+        if pool:
+            async def _create():
+                async with get_tenant_connection(tid) as conn:
+                    # Insert folder
+                    await conn.execute(
+                        """
+                        INSERT INTO folders (folder_id, tenant_id, folder_name, description, visibility, photo_count, created_by, created_at, updated_at)
+                        VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $7)
+                        """,
+                        fid, tid, clean_name, description, visibility, created_by, now_dt
+                    )
+                    # Atomically grant creator 'manager' access
+                    if created_by:
+                        await conn.execute(
+                            """
+                            INSERT INTO folder_user_access (folder_id, user_id, tenant_id, access_level, granted_by, created_at)
+                            VALUES ($1, $2, $3, 'manager', $2, $4)
+                            ON CONFLICT (folder_id, user_id) DO UPDATE SET access_level = 'manager'
+                            """,
+                            fid, created_by, tid, now_dt
+                        )
+                    return True
+            _run_sync(_create())
+        else:
+            with _mem_lock:
+                # Check unique folder name in tenant
+                for f in _mem_folders.values():
+                    if f.get("tenant_id") == tid and f.get("folder_name") == clean_name:
+                        raise ValueError(f"Folder '{clean_name}' already exists in tenant")
+                _mem_folders[fid] = {
+                    "folder_id": fid,
+                    "tenant_id": tid,
+                    "folder_name": clean_name,
+                    "description": description,
+                    "visibility": visibility,
+                    "photo_count": 0,
+                    "created_by": created_by,
+                    "created_at": now_dt.isoformat(),
+                    "updated_at": now_dt.isoformat(),
+                }
+                if created_by:
+                    _mem_folder_access[(fid, created_by)] = {
+                        "folder_id": fid,
+                        "user_id": created_by,
+                        "tenant_id": tid,
+                        "access_level": "manager",
+                        "granted_by": created_by,
+                        "created_at": now_dt.isoformat(),
+                    }
+
+        return {
+            "folder_id": fid,
+            "tenant_id": tid,
+            "folder_name": clean_name,
+            "description": description,
+            "visibility": visibility,
+            "photo_count": 0,
+            "created_by": created_by,
+            "created_at": now_dt.isoformat(),
+        }
+
+    def get_folder_by_id(self, folder_id: str, tenant_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve folder by ID scoped to tenant."""
+        tid = tenant_id.strip()
+        fid = folder_id.strip()
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+
+        if pool:
+            async def _get():
+                async with get_tenant_connection(tid) as conn:
+                    row = await conn.fetchrow(
+                        "SELECT * FROM folders WHERE tenant_id = $1 AND folder_id = $2",
+                        tid, fid
+                    )
+                    return dict(row) if row else None
+            return _run_sync(_get())
+
+        with _mem_lock:
+            f = _mem_folders.get(fid)
+            if f and f.get("tenant_id") == tid:
+                return dict(f)
+            return None
+
+    def get_folder_by_name(self, folder_name: str, tenant_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve folder by name scoped to tenant."""
+        tid = tenant_id.strip()
+        fname = folder_name.strip()
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+
+        if pool:
+            async def _get():
+                async with get_tenant_connection(tid) as conn:
+                    row = await conn.fetchrow(
+                        "SELECT * FROM folders WHERE tenant_id = $1 AND folder_name = $2",
+                        tid, fname
+                    )
+                    return dict(row) if row else None
+            return _run_sync(_get())
+
+        with _mem_lock:
+            for f in _mem_folders.values():
+                if f.get("tenant_id") == tid and f.get("folder_name") == fname:
+                    return dict(f)
+            return None
+
+    def update_folder(
+        self,
+        folder_id: str,
+        tenant_id: str,
+        folder_name: Optional[str] = None,
+        description: Optional[str] = None,
+        visibility: Optional[str] = None,
+    ) -> bool:
+        """Update folder attributes."""
+        tid = tenant_id.strip()
+        fid = folder_id.strip()
+        now_dt = datetime.now(timezone.utc)
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+
+        if pool:
+            async def _update():
+                async with get_tenant_connection(tid) as conn:
+                    current = await conn.fetchrow("SELECT * FROM folders WHERE tenant_id = $1 AND folder_id = $2", tid, fid)
+                    if not current:
+                        return False
+                    new_name = folder_name.strip() if folder_name else current["folder_name"]
+                    new_desc = description if description is not None else current["description"]
+                    new_vis = visibility if visibility else current["visibility"]
+                    res = await conn.execute(
+                        """
+                        UPDATE folders SET folder_name = $1, description = $2, visibility = $3, updated_at = $4
+                        WHERE tenant_id = $5 AND folder_id = $6
+                        """,
+                        new_name, new_desc, new_vis, now_dt, tid, fid
+                    )
+                    return "UPDATE 1" in res
+            return _run_sync(_update())
+
+        with _mem_lock:
+            f = _mem_folders.get(fid)
+            if not f or f.get("tenant_id") != tid:
+                return False
+            if folder_name:
+                f["folder_name"] = folder_name.strip()
+            if description is not None:
+                f["description"] = description
+            if visibility:
+                f["visibility"] = visibility
+            f["updated_at"] = now_dt.isoformat()
+            return True
+
+    def delete_folder(self, folder_id: str, tenant_id: str) -> bool:
+        """Delete folder and its member mappings."""
+        tid = tenant_id.strip()
+        fid = folder_id.strip()
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+
+        if pool:
+            async def _del():
+                async with get_tenant_connection(tid) as conn:
+                    res = await conn.execute("DELETE FROM folders WHERE tenant_id = $1 AND folder_id = $2", tid, fid)
+                    return "DELETE 1" in res
+            return _run_sync(_del())
+
+        with _mem_lock:
+            if fid in _mem_folders and _mem_folders[fid].get("tenant_id") == tid:
+                del _mem_folders[fid]
+                keys_to_del = [k for k in _mem_folder_access if k[0] == fid]
+                for k in keys_to_del:
+                    del _mem_folder_access[k]
+                return True
+            return False
+
+    def set_folder_access(
+        self,
+        folder_id: str,
+        user_id: str,
+        tenant_id: str,
+        access_level: str,
+        granted_by: Optional[str] = None,
+    ) -> bool:
+        """Set or update a user's access level for a specific folder."""
+        tid = tenant_id.strip()
+        fid = folder_id.strip()
+        uid = user_id.strip()
+        now_dt = datetime.now(timezone.utc)
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+
+        if pool:
+            async def _set():
+                async with get_tenant_connection(tid) as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO folder_user_access (folder_id, user_id, tenant_id, access_level, granted_by, created_at)
+                        VALUES ($1, $2, $3, $4, $5, $6)
+                        ON CONFLICT (folder_id, user_id) DO UPDATE
+                        SET access_level = EXCLUDED.access_level, granted_by = EXCLUDED.granted_by
+                        """,
+                        fid, uid, tid, access_level, granted_by, now_dt
+                    )
+                    return True
+            return _run_sync(_set())
+
+        with _mem_lock:
+            _mem_folder_access[(fid, uid)] = {
+                "folder_id": fid,
+                "user_id": uid,
+                "tenant_id": tid,
+                "access_level": access_level,
+                "granted_by": granted_by,
+                "created_at": now_dt.isoformat(),
+            }
+            return True
+
+    def bulk_set_folder_access(
+        self,
+        tenant_id: str,
+        folder_ids: List[str],
+        user_ids: List[str],
+        access_level: str,
+        granted_by: Optional[str] = None,
+    ) -> int:
+        """Bulk assign multiple users to multiple folders in one high-efficiency operation."""
+        count = 0
+        for fid in folder_ids:
+            for uid in user_ids:
+                if self.set_folder_access(fid, uid, tenant_id, access_level, granted_by):
+                    count += 1
+        return count
+
+    def remove_folder_access(self, folder_id: str, user_id: str, tenant_id: str) -> bool:
+        """Revoke a user's explicit folder access record."""
+        tid = tenant_id.strip()
+        fid = folder_id.strip()
+        uid = user_id.strip()
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+
+        if pool:
+            async def _del():
+                async with get_tenant_connection(tid) as conn:
+                    res = await conn.execute(
+                        "DELETE FROM folder_user_access WHERE tenant_id = $1 AND folder_id = $2 AND user_id = $3",
+                        tid, fid, uid
+                    )
+                    return "DELETE 1" in res
+            return _run_sync(_del())
+
+        with _mem_lock:
+            key = (fid, uid)
+            if key in _mem_folder_access:
+                del _mem_folder_access[key]
+                return True
+            return False
+
+    def get_folder_members(self, folder_id: str, tenant_id: str) -> List[Dict[str, Any]]:
+        """List all users who have explicit access records for this folder."""
+        tid = tenant_id.strip()
+        fid = folder_id.strip()
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+
+        if pool:
+            async def _members():
+                async with get_tenant_connection(tid) as conn:
+                    rows = await conn.fetch(
+                        """
+                        SELECT u.user_id, u.username, u.email, u.role as tenant_role,
+                               fua.access_level, fua.granted_by, fua.created_at
+                        FROM folder_user_access fua
+                        JOIN users u ON fua.user_id = u.user_id
+                        WHERE fua.tenant_id = $1 AND fua.folder_id = $2
+                        ORDER BY fua.created_at ASC
+                        """,
+                        tid, fid
+                    )
+                    return [dict(r) for r in rows]
+            return _run_sync(_members())
+
+        with _mem_lock:
+            results = []
+            for (f_id, u_id), a in _mem_folder_access.items():
+                if f_id == fid and a.get("tenant_id") == tid:
+                    u = _mem_users.get(u_id, {})
+                    results.append({
+                        "user_id": u_id,
+                        "username": u.get("username", "Unknown"),
+                        "email": u.get("email", ""),
+                        "tenant_role": u.get("role", "viewer"),
+                        "access_level": a.get("access_level", "inherit"),
+                        "granted_by": a.get("granted_by"),
+                        "created_at": a.get("created_at", ""),
+                    })
+            return results
+
+    def resolve_user_accessible_folders(
+        self,
+        user_id: str,
+        tenant_id: str,
+        role: str,
+    ) -> List[Dict[str, Any]]:
+        """
+        Executes the Single-Query Permission & Accessible Folders Resolver.
+        Evaluates tenant_wide visibility, explicit folder_user_access overrides,
+        and strictly excludes folders where access_level == 'revoked'.
+        """
+        tid = tenant_id.strip()
+        uid = user_id.strip()
+        urole = (role or "viewer").strip().lower()
+        pool = _run_sync(get_postgres_pool()) if is_postgres_configured() else None
+
+        if pool:
+            async def _resolve():
+                async with get_tenant_connection(tid) as conn:
+                    rows = await conn.fetch(
+                        """
+                        SELECT 
+                            f.folder_id,
+                            f.folder_name,
+                            f.description,
+                            f.visibility,
+                            f.photo_count,
+                            f.created_by,
+                            f.created_at,
+                            CASE
+                                WHEN $3 IN ('owner', 'admin') THEN 'manager'
+                                WHEN fua.access_level IS NOT NULL AND fua.access_level != 'inherit' THEN fua.access_level
+                                WHEN $3 = 'editor' THEN 'editor'
+                                WHEN $3 = 'contributor' THEN 'uploader'
+                                ELSE 'viewer'
+                            END AS effective_access
+                        FROM folders f
+                        LEFT JOIN folder_user_access fua 
+                               ON f.folder_id = fua.folder_id AND fua.user_id = $1
+                        WHERE f.tenant_id = $2
+                          AND (
+                              $3 IN ('owner', 'admin')
+                              OR (
+                                  COALESCE(fua.access_level, 'inherit') != 'revoked'
+                                  AND (f.visibility = 'tenant_wide' OR fua.user_id IS NOT NULL)
+                              )
+                          )
+                        ORDER BY f.folder_name ASC
+                        """,
+                        uid, tid, urole
+                    )
+                    res = []
+                    for r in rows:
+                        item = dict(r)
+                        eff = item["effective_access"]
+                        item["can_upload"] = eff in ("uploader", "editor", "manager")
+                        item["can_delete"] = eff in ("editor", "manager")
+                        item["can_manage"] = eff == "manager"
+                        item["created_at"] = str(item["created_at"])
+                        res.append(item)
+                    return res
+            return _run_sync(_resolve())
+
+        with _mem_lock:
+            res = []
+            for f in _mem_folders.values():
+                if f.get("tenant_id") != tid:
+                    continue
+                fid = f["folder_id"]
+                vis = f.get("visibility", "restricted")
+                acl = _mem_folder_access.get((fid, uid))
+
+                if urole in ("owner", "admin"):
+                    effective = "manager"
+                elif acl and acl.get("access_level") == "revoked":
+                    continue  # Trap 2: Explicitly revoked from tenant_wide or restricted
+                elif acl and acl.get("access_level") not in (None, "inherit"):
+                    effective = acl["access_level"]
+                elif vis == "tenant_wide":
+                    if urole == "editor":
+                        effective = "editor"
+                    elif urole == "contributor":
+                        effective = "uploader"
+                    else:
+                        effective = "viewer"
+                elif acl and acl.get("access_level") == "inherit":
+                    if urole == "editor":
+                        effective = "editor"
+                    elif urole == "contributor":
+                        effective = "uploader"
+                    else:
+                        effective = "viewer"
+                else:
+                    continue  # Restricted folder with no access record
+
+                res.append({
+                    "folder_id": fid,
+                    "folder_name": f.get("folder_name", ""),
+                    "description": f.get("description"),
+                    "visibility": vis,
+                    "photo_count": f.get("photo_count", 0),
+                    "created_by": f.get("created_by"),
+                    "created_at": str(f.get("created_at", "")),
+                    "effective_access": effective,
+                    "can_upload": effective in ("uploader", "editor", "manager"),
+                    "can_delete": effective in ("editor", "manager"),
+                    "can_manage": effective == "manager",
+                })
+            res.sort(key=lambda x: x["folder_name"])
+            return res
 
 
 _repo_instance: Optional[PostgresRepository] = None

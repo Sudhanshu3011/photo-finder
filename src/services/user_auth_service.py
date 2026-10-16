@@ -1,126 +1,402 @@
+"""
+src/services/user_auth_service.py — Orchestrator for Multi-Tenant Auth, Registration, and JWT Issuance.
+Implements decoupled tenant creation (register-tenant), invite previews, locked invite acceptance,
+per-tenant identity scoping, and multi-tenant workspace login disambiguation.
+"""
 import logging
+import secrets
 import uuid
-from typing import Optional, Dict, Any
+from datetime import datetime, timezone, timedelta
+from typing import Optional, Dict, Any, List, Union
+
+from src.schemas.auth_schemas import (
+    RegisterTenantRequest,
+    AcceptInviteRequest,
+    InvitePreviewResponse,
+    TenantRole,
+)
 from src.modules.infra.postgres_repository import get_repository
+from src.modules.infra.kv_cache import get_kv_cache
 from src.modules.auth.password_hasher import hash_password, verify_password
 from src.modules.auth.jwt_manager import create_access_token, decode_access_token
 
 logger = logging.getLogger("src.services.user_auth_service")
 
+
 class UserAuthService:
-    """Orchestrator for user authentication, registration, and authorization."""
+    """Orchestrator for decoupled multi-tenant authentication, registration, and authorization."""
 
     def __init__(self, repo=None):
         self.repo = repo or get_repository()
 
-    def register(
-        self,
-        username: str,
-        email: str,
-        password: str,
-        role: str = "user",
-        storage_bucket: Optional[str] = None,
-        cloudinary_url: Optional[str] = None,
-        tenant_id: str = "default",
-    ) -> Dict[str, Any]:
-        """Register a new user after verifying uniqueness."""
-        logger.info("[user_auth_service.register] Attempting registration for username=%s, email=%s, tenant_id=%s", username, email, tenant_id)
-        
-        # Check existing username
-        if self.repo.get_user_by_username(username):
-            logger.warning("[user_auth_service.register] Username '%s' already exists", username)
-            raise ValueError(f"Username '{username}' is already taken")
+    # -------------------------------------------------------------------
+    # Flow 1: Founding Admin Registration (Creates New Tenant)
+    # -------------------------------------------------------------------
+    def register_tenant(self, req: RegisterTenantRequest) -> Dict[str, Any]:
+        """
+        Creates a new tenant organization and assigns the registering user role = 'owner'.
+        Validates against active pending invites to prevent accidental orphan tenant creation.
+        """
+        clean_email = req.email.strip().lower()
+        clean_username = req.username.strip()
+        org_name = req.organization_name.strip()
+        logger.info("[user_auth_service.register_tenant] Creating tenant '%s' for email=%s", org_name, clean_email)
 
-        # Check existing email
-        if self.repo.get_user_by_email(email):
-            logger.warning("[user_auth_service.register] Email '%s' already registered", email)
-            raise ValueError(f"Email '{email}' is already registered")
+        # 1. Prevent accidental orphan tenant creation if user has an active invite elsewhere
+        if not req.ignore_pending_invite:
+            pending_invite = self.repo.get_active_invite_by_email(clean_email)
+            if pending_invite:
+                inv_org = pending_invite.get("organization_name", "another organization")
+                raise ValueError(
+                    f"You have a pending invitation to join '{inv_org}'. "
+                    "Please use your invitation link to join, or set ignore_pending_invite=True to create your own workspace."
+                )
 
-        user_id = f"user_{uuid.uuid4().hex[:12]}"
-        hashed_pw = hash_password(password)
+        # 2. Generate unique tenant_id and user_id
+        assigned_tenant = f"tenant_{uuid.uuid4().hex[:12]}"
+        user_id = f"usr_{uuid.uuid4().hex[:12]}"
+        storage_bucket = f"vs-{assigned_tenant}"
+        hashed_pw = hash_password(req.password)
 
-        bucket_or_url = storage_bucket or cloudinary_url
+        # 3. Create tenant record
+        self.repo.create_tenant(
+            tenant_id=assigned_tenant,
+            name=org_name,
+            storage_bucket=storage_bucket,
+        )
+
+        # 4. Create owner user bound to new tenant
         created = self.repo.create_user(
             user_id=user_id,
-            username=username,
-            email=email,
+            username=clean_username,
+            email=clean_email,
             hashed_password=hashed_pw,
-            role=role,
-            cloudinary_url=bucket_or_url,
-            tenant_id=tenant_id or "default",
+            role=TenantRole.OWNER.value,
+            storage_bucket=storage_bucket,
+            tenant_id=assigned_tenant,
         )
         if not created:
-            logger.error("[user_auth_service.register] Failed to save user to database")
-            raise RuntimeError("Database error while creating user")
+            raise RuntimeError("Database error while creating organization owner")
 
-        user = self.repo.get_user_by_id(user_id)
-        logger.info("[user_auth_service.register] Successfully registered user_id=%s", user_id)
+        # 5. Atomically seed default 'general' album with creator as manager
+        default_folder_id = f"fld_{uuid.uuid4().hex[:12]}"
+        try:
+            self.repo.create_folder(
+                folder_id=default_folder_id,
+                tenant_id=assigned_tenant,
+                folder_name="general",
+                description="Default organization photos",
+                visibility="tenant_wide",
+                created_by=user_id,
+            )
+        except Exception as e:
+            logger.warning("[user_auth_service.register_tenant] Default folder seed warning: %s", e)
+
+        logger.info("[user_auth_service.register_tenant] Tenant %s and owner %s created successfully", assigned_tenant, user_id)
+        user = self.repo.get_user_by_id(user_id, tenant_id=assigned_tenant) or {
+            "user_id": user_id,
+            "username": clean_username,
+            "email": clean_email,
+            "role": TenantRole.OWNER.value,
+            "tenant_id": assigned_tenant,
+        }
+        user["organization_name"] = org_name
         return user
 
-    def authenticate(self, username_or_email: str, password: str) -> Optional[Dict[str, Any]]:
-        """Authenticate user credentials and return user record if valid."""
-        logger.info("[user_auth_service.authenticate] Authenticating user: %s", username_or_email)
-        
-        user = self.repo.get_user_by_username(username_or_email)
-        if not user:
-            user = self.repo.get_user_by_email(username_or_email)
+    # -------------------------------------------------------------------
+    # Flow 2: Invited Member Onboarding (Preview & Accept)
+    # -------------------------------------------------------------------
+    def preview_invite(self, invite_token: str) -> Dict[str, Any]:
+        """
+        Public preview of an invitation token for the landing page.
+        Returns organization name, locked email, and assigned role.
+        """
+        invite = self.repo.get_invite_by_token(invite_token)
+        if not invite:
+            raise ValueError("Invitation link is invalid, expired, or has already been used.")
 
-        if not user:
-            logger.warning("[user_auth_service.authenticate] User not found: %s", username_or_email)
-            return None
+        return {
+            "invite_id": invite["invite_id"],
+            "tenant_id": invite["tenant_id"],
+            "organization_name": invite.get("organization_name", "Organization"),
+            "email": invite["email"],
+            "role": invite["role"],
+            "expires_at": str(invite["expires_at"]),
+        }
 
-        if not verify_password(password, user["hashed_password"]):
-            logger.warning("[user_auth_service.authenticate] Invalid password for: %s", username_or_email)
-            return None
+    def accept_invite(self, req: AcceptInviteRequest) -> Dict[str, Any]:
+        """
+        Consumes an invitation token and registers the member into the existing tenant.
+        The user's email is strictly locked to the invited email (0% hijacking risk).
+        """
+        token = req.invite_token.strip()
+        invite = self.repo.get_invite_by_token(token)
+        if not invite:
+            raise ValueError("Invitation link is invalid, expired, or has already been used.")
 
-        logger.info("[user_auth_service.authenticate] User authenticated successfully: %s", user["user_id"])
+        target_tenant = invite["tenant_id"]
+        invited_email = invite["email"].strip().lower()
+        clean_username = req.username.strip()
+        assigned_role = str(invite.get("role", "viewer")).lower()
+        storage_bucket = invite.get("storage_bucket")
+
+        # Check per-tenant uniqueness constraints
+        existing_email_in_tenant = self.repo.get_user_by_tenant_and_email(target_tenant, invited_email)
+        if existing_email_in_tenant:
+            raise ValueError(f"An account for '{invited_email}' already exists in this workspace. Please log in.")
+
+        existing_user_in_tenant = self.repo.get_user_by_tenant_and_username(target_tenant, clean_username)
+        if existing_user_in_tenant:
+            raise ValueError(f"Username '{clean_username}' is already taken in this workspace.")
+
+        user_id = f"usr_{uuid.uuid4().hex[:12]}"
+        hashed_pw = hash_password(req.password)
+
+        created = self.repo.create_user(
+            user_id=user_id,
+            username=clean_username,
+            email=invited_email,
+            hashed_password=hashed_pw,
+            role=assigned_role,
+            storage_bucket=storage_bucket,
+            tenant_id=target_tenant,
+        )
+        if not created:
+            raise RuntimeError("Failed to create user record for workspace")
+
+        # Atomically grant pre-assigned folders
+        initial_folders = invite.get("initial_folder_ids", [])
+        initial_access = invite.get("initial_access_level", "inherit")
+        for fid in initial_folders:
+            self.repo.set_folder_access(
+                folder_id=fid,
+                user_id=user_id,
+                tenant_id=target_tenant,
+                access_level=initial_access,
+                granted_by=invite.get("invited_by"),
+            )
+
+        # Mark invitation consumed
+        self.repo.mark_invite_accepted(token)
+        logger.info("[user_auth_service.accept_invite] User %s joined workspace %s via invite", user_id, target_tenant)
+
+        user = self.repo.get_user_by_id(user_id, tenant_id=target_tenant) or {
+            "user_id": user_id,
+            "username": clean_username,
+            "email": invited_email,
+            "role": assigned_role,
+            "tenant_id": target_tenant,
+        }
+        user["organization_name"] = invite.get("organization_name", "Organization")
         return user
 
+    # -------------------------------------------------------------------
+    # Flow 3: Unified Login & Tenant Disambiguation
+    # -------------------------------------------------------------------
+    def authenticate(
+        self,
+        email_or_username: str,
+        password: str,
+        tenant_id: Optional[str] = None,
+    ) -> Union[Dict[str, Any], List[Dict[str, Any]], None]:
+        """
+        Authenticates credentials across tenants using pre-auth lookup.
+        - If matching accounts exist in exactly 1 tenant: returns the user dict.
+        - If matching accounts exist in multiple tenants and tenant_id is provided: returns user in target tenant.
+        - If matching accounts exist in multiple tenants and tenant_id is NOT provided: returns list of matching user dicts.
+        """
+        clean_key = email_or_username.strip().lower()
+        logger.info("[user_auth_service.authenticate] Authenticating key: %s (tenant_id=%s)", clean_key, tenant_id)
+
+        # Look up all active tenant accounts matching this email globally
+        matching_users = self.repo.get_users_by_email_preauth(clean_key)
+        if not matching_users:
+            # Fallback check by username if not found by email
+            fallback_user = self.repo.get_user_preauth(clean_key)
+            if fallback_user and fallback_user.get("is_active", True):
+                matching_users = [fallback_user]
+
+        if not matching_users:
+            logger.warning("[user_auth_service.authenticate] No account found for: %s", clean_key)
+            return None
+
+        # Verify password on candidates
+        valid_users = [
+            u for u in matching_users
+            if u.get("hashed_password") and verify_password(password, u["hashed_password"])
+        ]
+        if not valid_users:
+            logger.warning("[user_auth_service.authenticate] Password verification failed for: %s", clean_key)
+            return None
+
+        # If caller explicitly provided tenant_id, select that specific tenant account
+        if tenant_id and tenant_id.strip():
+            tid = tenant_id.strip()
+            chosen = next((u for u in valid_users if u.get("tenant_id") == tid), None)
+            if not chosen:
+                logger.warning("[user_auth_service.authenticate] User has no membership in tenant_id=%s", tid)
+                return None
+            return chosen
+
+        # If user belongs to exactly one workspace, return it directly
+        if len(valid_users) == 1:
+            return valid_users[0]
+
+        # Multi-tenant user without tenant_id specified: return list for disambiguation modal
+        logger.info("[user_auth_service.authenticate] Multi-tenant disambiguation needed (%d tenants)", len(valid_users))
+        return valid_users
+
+    # -------------------------------------------------------------------
+    # Flow 4: Workspace Switching
+    # -------------------------------------------------------------------
+    def switch_tenant(self, email: str, target_tenant_id: str) -> Dict[str, Any]:
+        """
+        Switch active session context to another organization where the user has an active membership.
+        """
+        tid = target_tenant_id.strip()
+        user = self.repo.get_user_by_tenant_and_email(tid, email)
+        if not user or not user.get("is_active", True):
+            raise PermissionError(f"You do not have an active membership in workspace '{tid}'.")
+
+        logger.info("[user_auth_service.switch_tenant] Switched session for %s to workspace %s", email, tid)
+        return user
+
+    # -------------------------------------------------------------------
+    # Token & Cache Management
+    # -------------------------------------------------------------------
     def issue_token(self, user: Dict[str, Any]) -> str:
-        """Issue a JWT access token for the given user with tenant_id claim."""
+        """Issue a JWT access token and cache user credentials in Redis for instant revocation."""
         tid = user.get("tenant_id") or "default"
+        uid = user["user_id"]
+        role = user.get("role", "viewer")
+        org_name = user.get("organization_name", "")
+
         token_data = {
-            "sub": user["user_id"],
+            "sub": uid,
             "username": user["username"],
-            "role": user.get("role", "user"),
+            "email": user.get("email", ""),
+            "role": role,
             "tenant_id": tid,
+            "org": org_name,
         }
         token = create_access_token(data=token_data, tenant_id=tid)
-        logger.info("[user_auth_service.issue_token] Issued token for user_id=%s, tenant_id=%s", user["user_id"], tid)
+
+        # Cache in Redis with 5-minute TTL to mitigate Trap 3 (Stale JWT Claims)
+        try:
+            cache = get_kv_cache()
+            cache.set(f"user_auth:{tid}:{uid}", f"{role}:active", ttl=300)
+        except Exception:
+            pass
+
+        logger.info("[user_auth_service.issue_token] Issued token for user_id=%s, tenant_id=%s", uid, tid)
         return token
 
     def verify_token(self, token: str) -> Optional[Dict[str, Any]]:
-        """Validate token and return user data if valid."""
+        """Validate token and verify active status with cache or DB."""
         payload = decode_access_token(token)
         if not payload or "sub" not in payload:
             logger.warning("[user_auth_service.verify_token] Invalid or expired token")
             return None
-        
-        user = self.repo.get_user_by_id(payload["sub"])
+
+        uid = payload["sub"]
+        tid = payload.get("tenant_id", "default")
+
+        # Check instant revocation in cache if present
+        try:
+            cache = get_kv_cache()
+            cached_auth = cache.get(f"user_auth:{tid}:{uid}")
+            if cached_auth:
+                parts = str(cached_auth).split(":")
+                status = parts[1] if len(parts) > 1 else "active"
+                if status == "revoked":
+                    return None
+        except Exception:
+            pass
+
+        user = self.repo.get_user_by_id(uid, tenant_id=tid)
+        if not user:
+            user = self.repo.get_user_preauth(uid)
+
+        if user and not user.get("is_active", True):
+            return None
+
         if user and not user.get("tenant_id"):
-            user["tenant_id"] = payload.get("tenant_id", "default")
+            user["tenant_id"] = tid
+
+        if user and not user.get("organization_name"):
+            t = self.repo.get_tenant_by_id(tid)
+            if t:
+                user["organization_name"] = t.get("name", "Organization")
+
         return user
 
-    def get_profile(self, user_id: str) -> Optional[Dict[str, Any]]:
-        """Retrieve user profile by ID."""
-        return self.repo.get_user_by_id(user_id)
+    def invalidate_auth_cache(self, tenant_id: str, user_id: str):
+        """Immediately evict user authorization cache upon role change or deletion."""
+        try:
+            cache = get_kv_cache()
+            cache.delete(f"user_auth:{tenant_id}:{user_id}")
+        except Exception:
+            pass
 
-    def update_storage_config(self, user_id: str, bucket_or_config: str) -> bool:
-        """Update storage bucket / config on user's profile."""
-        logger.info("[user_auth_service.update_storage_config] Updating storage bucket for user_id=%s to %s", user_id, bucket_or_config)
-        return self.repo.update_user_cloudinary_url(user_id, bucket_or_config)
+    def create_invite(
+        self,
+        tenant_id: str,
+        email: str,
+        role: str,
+        invited_by: str,
+        initial_folder_ids: Optional[List[str]] = None,
+        initial_access_level: str = "inherit",
+    ) -> Dict[str, Any]:
+        """Create an organization invitation token."""
+        invite_id = f"inv_{uuid.uuid4().hex[:12]}"
+        invite_token = f"inv_{secrets.token_urlsafe(24)}"
+        expires_at = datetime.now(timezone.utc) + timedelta(days=7)
+        folder_ids = initial_folder_ids or []
 
-    def update_cloudinary_url(self, user_id: str, cloudinary_url: str) -> bool:
-        """Update Cloudinary URL on the user's profile (deprecated alias)."""
-        logger.info("[user_auth_service.update_cloudinary_url] Updating Cloudinary credentials for user_id=%s", user_id)
-        return self.update_storage_config(user_id, cloudinary_url)
+        created = self.repo.create_tenant_invite(
+            invite_id=invite_id,
+            tenant_id=tenant_id,
+            email=email,
+            role=role,
+            initial_folder_ids=folder_ids,
+            initial_access_level=initial_access_level,
+            invited_by=invited_by,
+            invite_token=invite_token,
+            expires_at=expires_at,
+        )
+        if not created:
+            raise RuntimeError("Failed to create tenant invite")
+
+        return {
+            "invite_id": invite_id,
+            "tenant_id": tenant_id,
+            "email": email,
+            "role": role,
+            "invite_token": invite_token,
+            "initial_folder_ids": folder_ids,
+            "expires_at": expires_at.isoformat(),
+        }
+
+    def get_profile(self, user_id: str, tenant_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Retrieve user profile by ID with organization_name."""
+        tid = (tenant_id or "default").strip()
+        user = self.repo.get_user_by_id(user_id, tenant_id=tid)
+        if user and not user.get("organization_name"):
+            t = self.repo.get_tenant_by_id(tid)
+            if t:
+                user["organization_name"] = t.get("name", "Organization")
+        return user
+
+    def update_storage_config(self, user_id: str, bucket_or_config: str, tenant_id: Optional[str] = None) -> bool:
+        """Update storage bucket on user's profile."""
+        return self.repo.update_user_storage_bucket(user_id, bucket_or_config, tenant_id=tenant_id)
 
 
 _auth_service_instance: Optional[UserAuthService] = None
+
 
 def get_auth_service() -> UserAuthService:
     global _auth_service_instance
     if _auth_service_instance is None:
         _auth_service_instance = UserAuthService()
     return _auth_service_instance
-

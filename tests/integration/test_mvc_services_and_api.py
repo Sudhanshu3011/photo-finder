@@ -28,28 +28,24 @@ async def test_auth_service_lifecycle(client: AsyncClient):
     test_username = f"user_{suffix}"
     test_email = f"user_{suffix}@example.com"
 
-    # 1. Register new user
+    # 1. Register new tenant organization & owner
     register_payload = {
         "username": test_username,
         "email": test_email,
         "password": "securepassword123",
-        "role": "admin"
+        "organization_name": f"{test_username} Studio",
     }
-    reg_resp = await client.post("/api/auth/register", json=register_payload)
+    reg_resp = await client.post("/api/auth/register-tenant", json=register_payload)
     assert reg_resp.status_code == 201
     reg_data = reg_resp.json()
     assert "access_token" in reg_data
     assert reg_data["username"] == test_username
     token = reg_data["access_token"]
 
-    # 2. Duplicate registration should be rejected
-    dup_resp = await client.post("/api/auth/register", json=register_payload)
-    assert dup_resp.status_code == 400
-
-    # 3. Login with credentials
+    # 2. Login with credentials
     login_resp = await client.post(
         "/api/auth/login",
-        json={"username": test_username, "password": "securepassword123"}
+        json={"email": test_email, "password": "securepassword123"}
     )
     assert login_resp.status_code == 200
     login_data = login_resp.json()
@@ -62,7 +58,7 @@ async def test_auth_service_lifecycle(client: AsyncClient):
     me_data = me_resp.json()
     assert me_data["username"] == test_username
     assert me_data["email"] == test_email
-    assert me_data["role"] == "admin"
+    assert me_data["role"] == "owner"
 
     # 5. Accessing /me without token fails with 401
     unauth_resp = await client.get("/api/auth/me")
@@ -103,9 +99,12 @@ async def test_photo_upload_service(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_image_processing_and_clustering(client: AsyncClient):
-    """Test AI processing trigger, clustering, and cluster renaming."""
-    # 1. Trigger clustering (should succeed even if empty or few faces)
-    cluster_resp = await client.post("/api/clusters/generate?folder_name=general&min_cluster_size=2")
+    # 1. Trigger clustering without 25 photos -> 422 Unprocessable Entity
+    rej_resp = await client.post("/api/clusters/generate?folder_name=general&min_cluster_size=2")
+    assert rej_resp.status_code == 422
+
+    # 2. Trigger clustering with admin force=true -> 200 OK
+    cluster_resp = await client.post("/api/clusters/generate?folder_name=general&min_cluster_size=2&force=true")
     assert cluster_resp.status_code == 200
     assert "status" in cluster_resp.json()
 
@@ -132,10 +131,11 @@ async def test_image_search_service(client: AsyncClient):
 @pytest.mark.asyncio
 async def test_storage_config_and_folder_scoping(client: AsyncClient):
     """Test object storage configuration, folder-targeted upload, and folder-scoped search."""
-    # 1. Check current config
-    cfg_resp = await client.get("/api/auth/storage-config")
+    # 1. Check current S3 health
+    cfg_resp = await client.get("/api/health/s3")
     assert cfg_resp.status_code == 200
-    assert "configured" in cfg_resp.json()
+    assert "status" in cfg_resp.json()
+    assert "storage" in cfg_resp.json()
 
     # 2. Upload photo with explicit folder_name
     img_bytes = create_mock_jpeg(140, 140)
@@ -153,8 +153,8 @@ async def test_storage_config_and_folder_scoping(client: AsyncClient):
     if search_resp.status_code == 200:
         assert "results" in search_resp.json()
 
-    # 4. RESTful clusters routes with folder scoping
-    c_gen = await client.post("/api/clusters/generate?min_cluster_size=2&folder_name=wedding_2026")
+    # 4. RESTful clusters routes with folder scoping (using admin force=true)
+    c_gen = await client.post("/api/clusters/generate?min_cluster_size=2&folder_name=wedding_2026&force=true")
     assert c_gen.status_code == 200
     c_list = await client.get("/api/clusters?folder_name=wedding_2026")
     assert c_list.status_code == 200

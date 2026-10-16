@@ -115,7 +115,7 @@ async def get_job_status(job_id: str, tenant_id: Optional[str] = None) -> Option
         return cached
 
     # Fallback to database
-    job = await db_get_job(job_id)
+    job = await db_get_job(job_id, tenant_id=tid)
     if job:
         job_tid = job.get("tenant_id", "default")
         if tid != "default" and job_tid != "default" and job_tid != tid:

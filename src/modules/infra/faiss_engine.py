@@ -6,7 +6,7 @@ Persistent to disk (data/faiss/*.index) with metadata synced to PostgreSQL.
 import json
 import os
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 import numpy as np
 
@@ -106,6 +106,8 @@ class FAISSEngine:
         os.makedirs(self.data_dir, exist_ok=True)
         # Partitioned index storage keyed by (tenant_id, index_name)
         self.indices: Dict[Tuple[str, str], Any] = {}
+        # In-memory folder-to-vector mapping: (tenant_id, folder_name) -> Set[int_id]
+        self._folder_vector_map: Dict[Tuple[str, str], Set[int]] = {}
         self.lock = threading.RLock()
         self._init_indices("default")
 
@@ -224,6 +226,11 @@ class FAISSEngine:
             else:
                 idx.add_with_ids(vecs, id_array)
 
+            # Record in-memory folder-to-vector mapping
+            for rec, iid in zip(records, int_ids):
+                fld = rec.get("folder") or "general"
+                self._folder_vector_map.setdefault((tid, fld), set()).add(int(iid))
+
         self.save_to_disk(index_name, tenant_id=tid)
         return len(records)
 
@@ -291,7 +298,7 @@ class FAISSEngine:
 
         target_dim = q_vec.shape[1]
         idx = self.get_index(index_name, tenant_id=tid, dim=target_dim)
-        fetch_k = top_k * 3 if filter_dict else top_k
+        fetch_k = top_k * 5 if filter_dict else top_k
 
         with self.lock:
             if idx.ntotal == 0 or idx.d != target_dim:
@@ -316,7 +323,12 @@ class FAISSEngine:
             if filter_dict:
                 match = True
                 for fk, fv in filter_dict.items():
-                    if meta.get(fk) != fv and entry.get(fk) != fv:
+                    if fk == "allowed_folders" and isinstance(fv, (list, set, tuple)):
+                        entry_fld = entry.get("folder") or meta.get("folder")
+                        if entry_fld not in fv:
+                            match = False
+                            break
+                    elif meta.get(fk) != fv and entry.get(fk) != fv:
                         match = False
                         break
                 if not match:
@@ -419,4 +431,9 @@ class FAISSEngine:
 
 vector_engine = FAISSEngine()
 FAISSVectorStore = FAISSEngine
+
+
+def get_faiss_engine() -> FAISSEngine:
+    """Return the global FAISSEngine singleton."""
+    return vector_engine
 

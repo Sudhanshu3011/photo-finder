@@ -264,7 +264,7 @@ class AIModelManager:
             os.makedirs(CACHE_PATH, exist_ok=True)
             hf_hub_download(
                 repo_id=REPO_ID, filename="files.txt", token=HF_TOKEN,
-                local_dir=CACHE_PATH, local_dir_use_symlinks=False,
+                local_dir=CACHE_PATH,
             )
             with open(os.path.join(CACHE_PATH, "files.txt")) as f:
                 extra = [x.strip() for x in f.read().split("\n") if x.strip()]
@@ -272,7 +272,7 @@ class AIModelManager:
                 if not os.path.exists(os.path.join(CACHE_PATH, fname)):
                     hf_hub_download(
                         repo_id=REPO_ID, filename=fname, token=HF_TOKEN,
-                        local_dir=CACHE_PATH, local_dir_use_symlinks=False,
+                        local_dir=CACHE_PATH,
                     )
             cwd = os.getcwd()
             os.chdir(CACHE_PATH)

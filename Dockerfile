@@ -78,6 +78,7 @@ ENV WEB_CONCURRENCY=1 \
     NUMEXPR_NUM_THREADS=2 \
     TOKENIZERS_PARALLELISM=false \
     ORT_DISABLE_ALL_OPTIMIZATIONS=0 \
+    NO_ALBUMENTATIONS_UPDATE=1 \
     ONNX_MODELS_DIR=/app/onnx_models
 
 # ── Step 7: Pre-converted ONNX models (if present) ─────────────────

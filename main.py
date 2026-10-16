@@ -14,6 +14,8 @@ from src.core.config import MAX_CONCURRENT_INFERENCES
 from src.core.logging import log, init_logging_session, close_logging_session
 from src.api import (
     auth_router,
+    tenant_router,
+    folder_router,
     upload_router,
     processing_router,
     search_router,
@@ -82,6 +84,8 @@ os.makedirs("saved_images", exist_ok=True)
 app.include_router(ui_router)
 app.include_router(system_router)
 app.include_router(auth_router)
+app.include_router(tenant_router)
+app.include_router(folder_router)
 app.include_router(upload_router)
 app.include_router(processing_router)
 app.include_router(search_router)

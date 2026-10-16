@@ -31,5 +31,27 @@ class FolderSyncResponse(BaseModel):
     items: List[PhotoUploadItem]
 
 
+class ClientLogEventRequest(BaseModel):
+    event: str = Field(..., min_length=1, max_length=100, pattern=r"^[a-zA-Z0-9_\.\-]+$", description="Telemetry event name")
+    level: str = Field("INFO", pattern=r"^(DEBUG|INFO|WARNING|ERROR|CRITICAL)$", description="Log level")
+    payload: Optional[dict] = Field(default_factory=dict, description="Additional context payload (max 16KB)")
+
+
+class ClientLogEventResponse(BaseModel):
+    success: bool
+    message: str
+
+
+class S3HealthResponse(BaseModel):
+    status: str
+    storage: str
+    bucket: str
+    region: Optional[str] = None
+    accessible: bool
+    latency_ms: Optional[float] = None
+    error: Optional[str] = None
+    timestamp: str
+
+
 
 

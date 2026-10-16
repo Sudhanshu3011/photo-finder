@@ -22,6 +22,7 @@ from src.modules.vision.object_embedder import extract_object_embedding
 from src.modules.clustering.hdbscan_clusterer import run_hdbscan_clustering, select_cluster_representative
 from src.modules.storage.local_storage import get_image_path
 from src.core.tenant_context import get_current_tenant_id
+from src.services.inference_client import get_inference_client, InferenceClient
 
 logger = logging.getLogger("src.services.image_processing_service")
 
@@ -32,11 +33,13 @@ class ImageProcessingService:
     Delegates all algorithm details to src.modules.*
     """
 
-    def __init__(self, ai=None, repo=None, engine=None):
+    def __init__(self, ai=None, repo=None, engine=None, inference_client: Optional[InferenceClient] = None):
         self.ai = ai
         self.repo = repo or get_repository()
         self.engine = engine or vector_engine
         self.cache = get_kv_cache()
+        self.inference_client = inference_client or get_inference_client()
+
 
     def process_image_cv(
         self,
@@ -56,15 +59,27 @@ class ImageProcessingService:
                     image_id, folder_name or "general", tid, cv_img.shape[1], cv_img.shape[0])
         
         # 1. Face Detection & Feature Extraction
-        detected_faces = detect_faces(self.ai, cv_img)
+        if self.inference_client is not None:
+            detected_faces = self.inference_client.detect_faces_sync(cv_img)
+        else:
+            detected_faces = detect_faces(self.ai, cv_img)
         faces_saved = 0
 
         for f in detected_faces:
-            target_obj = f if (isinstance(f, dict) and "arcface_vector" in f) else f.get("face_obj", f)
-            if target_obj is None:
-                continue
+            if self.inference_client is not None:
+                crop = f.get("crop")
+                if crop is None and f.get("bbox"):
+                    x1, y1, x2, y2 = f["bbox"]
+                    crop = cv_img[y1:y2, x1:x2]
+                if crop is None:
+                    crop = cv_img
+                emb_data = self.inference_client.extract_face_embeddings_sync(crop)
+            else:
+                target_obj = f if (isinstance(f, dict) and "arcface_vector" in f) else f.get("face_obj", f)
+                if target_obj is None:
+                    continue
+                emb_data = extract_face_embeddings(self.ai, target_obj)
 
-            emb_data = extract_face_embeddings(self.ai, target_obj)
             arcface_vec = emb_data.get("arcface_vector")
             adaface_vec = emb_data.get("adaface_vector")
 
@@ -109,8 +124,13 @@ class ImageProcessingService:
                 faces_saved += 1
 
         # 2. Object & Scene Embedding Extraction
-        obj_vec = extract_object_embedding(self.ai, cv_img)
+        if self.inference_client is not None:
+            obj_vec = self.inference_client.extract_scene_embedding_sync(cv_img)
+        else:
+            obj_vec = extract_object_embedding(self.ai, cv_img)
+
         objects_saved = 0
+
         if obj_vec and len(obj_vec) > 0:
             obj_id = f"obj_{image_id}"
             meta = {
@@ -285,6 +305,11 @@ class ImageProcessingService:
             )
             clusters_created += 1
 
+        # Update watermark in cache to record last clustered count
+        if folder_name and folder_name.strip():
+            clean_f = folder_name.strip()
+            self.cache.set(f"cluster_watermark:{tid}:{clean_f}", len(records))
+
         logger.info("[Face Clustering] Finished clustering: discovered %d identity clusters across %d indexed faces (tenant: %s)",
                     clusters_created, len(vectors), tid)
         return {
@@ -294,6 +319,49 @@ class ImageProcessingService:
             "folder": folder_name,
             "tenant_id": tid,
             "message": f"Successfully clustered {len(vectors)} faces into {clusters_created} identity groups"
+        }
+
+    def get_cluster_status(
+        self,
+        folder_name: str,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Calculates total indexed photos vs. last clustered watermark,
+        returning exact delta and clustering readiness.
+        """
+        tid = (tenant_id or get_current_tenant_id()).strip()
+        clean_folder = (folder_name or "").strip()
+        folder = self.repo.get_folder_by_name(clean_folder, tenant_id=tid) or self.repo.get_folder_by_id(clean_folder, tenant_id=tid)
+        db_photo_count = folder.get("photo_count", 0) if folder else 0
+
+        # Also count face records matching folder
+        records = self.engine.get_all_records(IDX_FACES, tenant_id=tid)
+        folder_records = [
+            r for r in records
+            if (r.get("metadata") or {}).get("folder") == clean_folder
+            or r.get("folder") == clean_folder
+        ]
+        effective_total = max(db_photo_count, len(folder_records))
+
+        watermark_key = f"cluster_watermark:{tid}:{clean_folder}"
+        cached_val = self.cache.get(watermark_key)
+        try:
+            last_clustered_count = int(cached_val) if cached_val is not None else 0
+        except (ValueError, TypeError):
+            last_clustered_count = 0
+
+        delta = max(0, effective_total - last_clustered_count)
+        # Ready if delta >= 25 or if it is the initial clustering run with at least 5 photos
+        ready = (delta >= 25) or (last_clustered_count == 0 and effective_total >= 5)
+
+        return {
+            "folder_name": clean_folder,
+            "total_photos": effective_total,
+            "last_clustered_count": last_clustered_count,
+            "new_photos_since_last_cluster": delta,
+            "threshold": 25,
+            "ready_for_clustering": ready,
         }
 
     def get_clusters(

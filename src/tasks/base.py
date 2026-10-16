@@ -4,7 +4,22 @@ Guarantees that every task executed across distributed worker pools binds its ex
 to the correct tenant_id before start and cleans up contextvars upon completion.
 """
 from typing import Any, Optional
-import celery
+try:
+    import celery
+    _BaseTask = celery.Task
+except ImportError:
+    celery = None  # type: ignore
+    class _BaseTask:  # type: ignore
+        abstract = True
+        def __init__(self, *args, **kwargs):
+            self.name = kwargs.get("name", "task")
+            self.request = None
+        def before_start(self, task_id: str, args: tuple, kwargs: dict) -> None:
+            pass
+        def after_return(self, status: str, retval: Any, task_id: str, args: tuple, kwargs: dict, einfo: Any) -> None:
+            pass
+
+
 from src.core.logging import log
 from src.core.tenant_context import (
     DEFAULT_TENANT_ID,
@@ -15,8 +30,8 @@ from src.core.tenant_context import (
 from src.modules.infra.kv_cache import get_kv_cache
 
 
+class TenantAwareTask(_BaseTask):
 
-class TenantAwareTask(celery.Task):
     """
     Abstract Celery Task that enforces tenant context isolation.
     Automatically intercepts tenant_id from headers or kwargs and sets the tenant context.

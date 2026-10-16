@@ -3,7 +3,7 @@ src/api/ui.py — Interactive Web Upload Interface.
 Allows users to select and upload up to 50 images at once via a single file picker or drag-and-drop,
 automatically triggering batch ingestion and AI vector processing into FAISS.
 """
-from fastapi import APIRouter
+from fastapi import APIRouter, status
 from fastapi.responses import HTMLResponse
 
 router = APIRouter()
@@ -67,11 +67,6 @@ HTML_PAGE = """<!DOCTYPE html>
     <div class="form-group">
       <label for="folderInput">Target Album / S3 Prefix</label>
       <input type="text" id="folderInput" value="general" placeholder="e.g. wedding_2026, vacation, portraits">
-    </div>
-
-    <div class="form-group">
-      <label for="cldInput">Target S3 Bucket (Optional — defaults to server AWS_S3_BUCKET)</label>
-      <input type="text" id="cldInput" placeholder="e.g. visual-search-media">
     </div>
 
     <div class="checkbox-group">
@@ -151,7 +146,6 @@ HTML_PAGE = """<!DOCTYPE html>
 
       const folder = document.getElementById('folderInput').value.trim() || 'general';
       const autoProcess = document.getElementById('autoProcess').checked;
-      const cld = document.getElementById('cldInput').value.trim();
       const jwt = document.getElementById('jwtInput').value.trim();
 
       if (jwt) localStorage.setItem('jwt_token', jwt);
@@ -169,11 +163,6 @@ HTML_PAGE = """<!DOCTYPE html>
 
       const formData = new FormData();
       formData.append('folder_name', folder);
-      if (cld) {
-        formData.append('s3_bucket', cld);
-        formData.append('cloudinary_url', cld);
-        localStorage.setItem('s3_bucket', cld);
-      }
 
       selectedFiles.forEach(f => {
         formData.append('files', f);
@@ -264,7 +253,7 @@ HTML_PAGE = """<!DOCTYPE html>
 </html>
 """
 
-@router.get("/ui", response_class=HTMLResponse, summary="Interactive Multi-Image Upload UI")
+@router.get("/ui", response_class=HTMLResponse, status_code=status.HTTP_200_OK, summary="Interactive Multi-Image Upload UI")
 async def upload_ui():
     """Serves an intuitive HTML upload interface allowing single-dialog multi-image selection up to 50 photos."""
     return HTMLResponse(content=HTML_PAGE)

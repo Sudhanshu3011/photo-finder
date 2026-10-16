@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 
 from celery_app import app
 from src.core.logging import log
+from src.core.config import MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_MB
 from src.core.tenant_context import DEFAULT_TENANT_ID, set_current_tenant_id
 from src.modules.deduplication.image_hasher import (
     compute_phash,
@@ -74,8 +75,27 @@ def task_process_image_upload(
         if not contents:
             raise ValueError("Empty image payload received")
 
-        # 2. Quality assessment
-        quality = assess_image_quality(contents)
+        # Size check (Max 20MB per image)
+        if len(contents) > MAX_UPLOAD_SIZE_BYTES:
+            size_mb = len(contents) / (1024 * 1024)
+            reason = f"File size exceeds maximum allowed limit of {MAX_UPLOAD_SIZE_MB}MB ({size_mb:.1f}MB uploaded)."
+            log("WARN", "tasks.ingest.file_too_large", filename=fname, size_mb=round(size_mb, 2))
+            record_task_outcome(
+                job_id=job_id,
+                tenant_id=tenant_id,
+                outcome="failed",
+                log_msg=f"Image '{fname}' rejected: {reason}",
+            )
+            return {
+                "image_id": img_id,
+                "status": "failed",
+                "reason": reason,
+                "tenant_id": tenant_id,
+                "job_id": job_id,
+            }
+
+        # 2. Quality & Format assessment
+        quality = assess_image_quality(contents, filename=fname)
         if not quality.get("is_valid"):
             reason = quality.get("reason", "Corrupted image")
             log("WARN", "tasks.ingest.invalid_quality", filename=fname, reason=reason)

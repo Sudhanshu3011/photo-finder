@@ -43,7 +43,20 @@ IDX_FACES_ADAFACE = os.getenv("IDX_FACES_ADAFACE", "faces-adaface")
 # ──────────────────────────────────────────────────────────────
 MAX_CONCURRENT_INFERENCES = int(os.getenv("MAX_CONCURRENT_INFERENCES", "2"))
 MAX_FILES_PER_UPLOAD = int(os.getenv("MAX_FILES_PER_UPLOAD", "50"))
+MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "20"))
+MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
 INFERENCE_CACHE_SIZE = int(os.getenv("INFERENCE_CACHE_SIZE", "128"))
+
+# Allowed image file formats & MIME types
+ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"}
+ALLOWED_IMAGE_MIMES = {
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/bmp",
+    "image/tiff",
+    "image/x-ms-bmp",
+}
 
 
 
@@ -141,13 +154,8 @@ FACE_RESULTS_PER_QUERY_CAP = int(os.getenv("FACE_RESULTS_PER_QUERY_CAP", "500"))
 # Phase 3: People View + Job Queue — DEFAULT OFF (opt-in via env)
 # ──────────────────────────────────────────────────────────────
 
-# Redis-backed inference cache + job queue (requires Upstash)
-# Set UPSTASH_REDIS_URL + UPSTASH_REDIS_TOKEN in HF Space secrets.
-
-
+# Redis-backed inference cache + job queue
 # Master toggle: enable the persistent Redis cache (replaces in-memory dict).
-# Falls back to in-memory if UPSTASH_REDIS_URL is not set, so this is safe to
-# leave True even before Upstash is wired up.
 USE_REDIS_CACHE = int(os.getenv("USE_REDIS_CACHE", "0"))
 
 # Async upload mode: when True, POST /api/upload?async=true returns a job_id
@@ -176,3 +184,17 @@ CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", REDIS_URL_DEFAULT)
 CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", REDIS_URL_DEFAULT)
 CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER", "False").lower() in ("true", "1")
 ENABLE_CELERY_WORKERS = os.getenv("ENABLE_CELERY_WORKERS", "1").lower() in ("true", "1")
+
+# ──────────────────────────────────────────────────────────────
+# Phase 3: NVIDIA Triton Inference Server & AI Decoupling
+# ──────────────────────────────────────────────────────────────
+INFERENCE_BACKEND = os.getenv("INFERENCE_BACKEND", "local").lower()  # "triton" or "local"
+TRITON_SERVER_URL = os.getenv("TRITON_SERVER_URL", "localhost:8001")
+TRITON_HTTP_URL = os.getenv("TRITON_HTTP_URL", "http://localhost:8000")
+TRITON_TIMEOUT_SECONDS = float(os.getenv("TRITON_TIMEOUT_SECONDS", "5.0"))
+TRITON_MODEL_ARCFACE = os.getenv("TRITON_MODEL_ARCFACE", "arcface_recognizer")
+TRITON_MODEL_ADAFACE = os.getenv("TRITON_MODEL_ADAFACE", "adaface_recognizer")
+TRITON_MODEL_DINOV2 = os.getenv("TRITON_MODEL_DINOV2", "dinov2_embedder")
+TRITON_MODEL_SIGLIP = os.getenv("TRITON_MODEL_SIGLIP", "siglip_embedder")
+TRITON_MODEL_SCRFD = os.getenv("TRITON_MODEL_SCRFD", "scrfd_detector")
+TRITON_MODEL_YOLO = os.getenv("TRITON_MODEL_YOLO", "yolo11_segmenter")

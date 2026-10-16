@@ -4,7 +4,45 @@ Segregates tasks across dedicated priority queues: queue.ingest, queue.inference
 Guarantees tenant context isolation, message durability, and late acknowledgements.
 """
 import os
-from celery import Celery
+try:
+    from celery import Celery
+    CELERY_AVAILABLE = True
+except ImportError:
+    CELERY_AVAILABLE = False
+    class _CeleryConf(dict):  # type: ignore
+        def __getattr__(self, name):
+            return self.get(name)
+        def __setattr__(self, name, val):
+            self[name] = val
+        def update(self, *args, **kwargs):
+            d = dict(*args, **kwargs)
+            super().update(d)
+            for k, v in d.items():
+                self[k] = v
+
+    class Celery:  # type: ignore
+        def __init__(self, *args, **kwargs):
+            self.conf = _CeleryConf()
+        def task(self, *args, **kwargs):
+            bind = kwargs.get("bind", False)
+            def decorator(f):
+                class _TaskWrapper:
+                    def __init__(self, fn):
+                        self.fn = fn
+                        self.__name__ = getattr(fn, "__name__", "task")
+                    def __call__(self, *a, **kw):
+                        if bind:
+                            return self.fn(self, *a, **kw)
+                        return self.fn(*a, **kw)
+                    def s(self, *a, **kw):
+                        return self
+                    def apply_async(self, *a, **kw):
+                        return self(*a, **kw)
+                wrapper = _TaskWrapper(f)
+                return wrapper
+            return decorator
+
+
 from src.core.config import (
     CELERY_BROKER_URL,
     CELERY_RESULT_BACKEND,
@@ -22,6 +60,7 @@ app = Celery(
         "src.tasks.clustering_tasks",
     ],
 )
+
 
 # 2. Celery Production Configuration
 app.conf.update(
@@ -59,6 +98,8 @@ app.conf.update(
     },
     result_expires=86400,                # 24 hour TTL for task results in Redis
 )
+
+celery = app
 
 if __name__ == "__main__":
     app.start()

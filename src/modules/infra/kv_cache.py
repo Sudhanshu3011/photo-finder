@@ -1,7 +1,7 @@
 """
 src/modules/infra/kv_cache.py — Distributed Redis & In-Memory Cache.
 Provides sub-millisecond ephemeral state for jobs, rate limiting, and temporary tokens.
-Supports standard Redis, AWS ElastiCache, and Upstash Redis via REDIS_URL.
+Supports standard Redis and AWS ElastiCache via REDIS_URL.
 """
 import json
 import logging
@@ -20,7 +20,7 @@ except ImportError:
 
 
 class KeyValueCache:
-    """Distributed cache with Redis backend (Standard, ElastiCache, or Upstash) and in-memory fallback."""
+    """Distributed cache with Redis backend and in-memory fallback."""
 
     def __init__(self):
         self._mem_store: dict[str, tuple[Any, float]] = {}

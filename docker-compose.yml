@@ -1,5 +1,6 @@
 services:
   api:
+    image: visual-search-api-api:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -8,6 +9,7 @@ services:
     container_name: visual_search_api
     ports:
       - "7860:7860"
+    command: uvicorn main:app --host 0.0.0.0 --port 7860 --reload
     env_file:
       - .env
     environment:
@@ -16,6 +18,10 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - FAISS_DATA_DIR=data/faiss
+      - INFERENCE_BACKEND=${INFERENCE_BACKEND:-local}
+      - TRITON_SERVER_URL=${TRITON_SERVER_URL:-triton-server:8001}
+      - NO_ALBUMENTATIONS_UPDATE=1
+
     depends_on:
       postgres:
         condition: service_healthy
@@ -30,9 +36,11 @@ services:
       - ./data:/app/data
       - ./saved_images:/app/saved_images
       - ./temp_uploads:/app/temp_uploads
+      - ./scripts:/app/scripts
     restart: unless-stopped
 
   worker-ingest:
+    image: visual-search-api-api:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -60,6 +68,7 @@ services:
     restart: unless-stopped
 
   worker-inference:
+    image: visual-search-api-api:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -73,6 +82,10 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - FAISS_DATA_DIR=data/faiss
+      - INFERENCE_BACKEND=${INFERENCE_BACKEND:-local}
+      - TRITON_SERVER_URL=${TRITON_SERVER_URL:-triton-server:8001}
+      - NO_ALBUMENTATIONS_UPDATE=1
+
     depends_on:
       postgres:
         condition: service_healthy
@@ -87,6 +100,7 @@ services:
     restart: unless-stopped
 
   worker-clustering:
+    image: visual-search-api-api:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -114,6 +128,7 @@ services:
     restart: unless-stopped
 
   flower:
+    image: visual-search-api-api:latest
     build:
       context: .
       dockerfile: Dockerfile
@@ -127,6 +142,9 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    volumes:
+      - ./src:/app/src
+      - ./celery_app.py:/app/celery_app.py
     restart: unless-stopped
 
   postgres:
@@ -138,7 +156,8 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: visual_search
     ports:
-      - "5432:5432"
+      - "5433:5432"
+
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -161,6 +180,20 @@ services:
       timeout: 5s
       retries: 5
 
+  triton-server:
+    profiles: ["triton", "gpu"]
+    image: nvcr.io/nvidia/tritonserver:24.01-py3
+    container_name: visual_search_triton
+    command: ["tritonserver", "--model-repository=/models", "--strict-model-config=false", "--log-verbose=0"]
+    ports:
+      - "8000:8000"   # HTTP
+      - "8001:8001"   # gRPC
+      - "8002:8002"   # Prometheus Metrics
+    volumes:
+      - ./model_repository:/models
+    restart: unless-stopped
+
 volumes:
   pgdata:
   redisdata:
+
