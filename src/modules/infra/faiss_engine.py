@@ -5,8 +5,10 @@ Persistent to disk (data/faiss/*.index) with metadata synced to PostgreSQL.
 """
 import json
 import os
+import shutil
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+import uuid
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 import numpy as np
 
@@ -106,6 +108,8 @@ class FAISSEngine:
         os.makedirs(self.data_dir, exist_ok=True)
         # Partitioned index storage keyed by (tenant_id, index_name)
         self.indices: Dict[Tuple[str, str], Any] = {}
+        # Track disk modification timestamps to detect cross-process worker updates
+        self._index_mtimes: Dict[Tuple[str, str], float] = {}
         self.lock = threading.RLock()
         self._init_indices("default")
 
@@ -135,6 +139,7 @@ class FAISSEngine:
                                 self.indices[key] = faiss.IndexIDMap2(raw)
                             else:
                                 self.indices[key] = loaded
+                            self._index_mtimes[key] = os.path.getmtime(path)
                         except Exception as e:
                             warn(f"Failed to load FAISS index from {path}: {e}. Creating new.")
                             raw = faiss.IndexFlatIP(dim)
@@ -148,30 +153,44 @@ class FAISSEngine:
     def get_index(self, index_name: str, tenant_id: Optional[str] = None, dim: Optional[int] = None):
         tid = (tenant_id or get_current_tenant_id()).strip()
         key = (tid, index_name)
-        with self.lock:
-            if key not in self.indices:
-                d = dim or self.DIMENSIONS.get(index_name, 512)
-                path = self._get_index_path(index_name, tid)
-                legacy_path = os.path.join(self.data_dir, f"{index_name}.index")
-                if not os.path.exists(path) and os.path.exists(legacy_path) and tid == "default":
-                    path = legacy_path
+        d = dim or self.DIMENSIONS.get(index_name, 512)
+        path = self._get_index_path(index_name, tid)
+        legacy_path = os.path.join(self.data_dir, f"{index_name}.index")
+        if not os.path.exists(path) and os.path.exists(legacy_path) and tid == "default":
+            path = legacy_path
 
-                if HAS_FAISS:
-                    if os.path.exists(path):
+        with self.lock:
+            if HAS_FAISS:
+                if os.path.exists(path):
+                    disk_mtime = os.path.getmtime(path)
+                    cached_mtime = self._index_mtimes.get(key, 0.0)
+                    # Automatically reload index if not loaded or if disk snapshot was updated by worker fleet
+                    if key not in self.indices or disk_mtime > cached_mtime:
                         try:
-                            self.indices[key] = faiss.read_index(path)
-                        except Exception:
-                            raw = faiss.IndexFlatIP(d)
-                            self.indices[key] = faiss.IndexIDMap2(raw)
-                    else:
+                            loaded = faiss.read_index(path)
+                            if loaded.d == d or dim is None:
+                                self.indices[key] = loaded
+                                self._index_mtimes[key] = disk_mtime
+                            else:
+                                raw = faiss.IndexFlatIP(d)
+                                self.indices[key] = faiss.IndexIDMap2(raw)
+                        except Exception as e:
+                            warn(f"Failed to load/reload FAISS index from {path}: {e}")
+                            if key not in self.indices:
+                                raw = faiss.IndexFlatIP(d)
+                                self.indices[key] = faiss.IndexIDMap2(raw)
+                else:
+                    if key not in self.indices:
                         raw = faiss.IndexFlatIP(d)
                         self.indices[key] = faiss.IndexIDMap2(raw)
-                else:
+            else:
+                if key not in self.indices:
                     self.indices[key] = NumpyVectorIndex(d)
+
             return self.indices[key]
 
     def save_to_disk(self, index_name: Optional[str] = None, tenant_id: Optional[str] = None):
-        """Persist native FAISS indexes to disk scoped to tenant."""
+        """Persist native FAISS indexes to disk scoped to tenant using atomic snapshot publishing."""
         if not HAS_FAISS:
             return
         target_tid = (tenant_id or get_current_tenant_id()).strip() if tenant_id else None
@@ -182,10 +201,18 @@ class FAISSEngine:
                     idx = self.indices.get((tid, name))
                     if idx is not None:
                         path = self._get_index_path(name, tid)
+                        tmp_path = f"{path}.tmp.{uuid.uuid4().hex}"
                         try:
-                            faiss.write_index(idx, path)
+                            faiss.write_index(idx, tmp_path)
+                            os.replace(tmp_path, path)  # Atomic POSIX rename prevents partial reader loads
+                            self._index_mtimes[(tid, name)] = os.path.getmtime(path)
                         except Exception as e:
                             warn(f"Failed to persist FAISS index {name} for tenant {tid}: {e}")
+                            if os.path.exists(tmp_path):
+                                try:
+                                    os.remove(tmp_path)
+                                except Exception:
+                                    pass
 
     def upsert(self, index_name: str, records: List[dict], tenant_id: Optional[str] = None) -> int:
         """
@@ -291,7 +318,7 @@ class FAISSEngine:
 
         target_dim = q_vec.shape[1]
         idx = self.get_index(index_name, tenant_id=tid, dim=target_dim)
-        fetch_k = top_k * 3 if filter_dict else top_k
+        fetch_k = top_k * 5 if filter_dict else top_k
 
         with self.lock:
             if idx.ntotal == 0 or idx.d != target_dim:
@@ -316,7 +343,12 @@ class FAISSEngine:
             if filter_dict:
                 match = True
                 for fk, fv in filter_dict.items():
-                    if meta.get(fk) != fv and entry.get(fk) != fv:
+                    if fk == "allowed_folders" and isinstance(fv, (list, set, tuple)):
+                        entry_fld = entry.get("folder") or meta.get("folder")
+                        if entry_fld not in fv:
+                            match = False
+                            break
+                    elif meta.get(fk) != fv and entry.get(fk) != fv:
                         match = False
                         break
                 if not match:
@@ -391,7 +423,6 @@ class FAISSEngine:
                 self.indices.pop(k, None)
             tenant_dir = os.path.join(self.data_dir, tid)
             if os.path.exists(tenant_dir):
-                import shutil
                 shutil.rmtree(tenant_dir, ignore_errors=True)
             self._init_indices(tid)
 
@@ -419,4 +450,9 @@ class FAISSEngine:
 
 vector_engine = FAISSEngine()
 FAISSVectorStore = FAISSEngine
+
+
+def get_faiss_engine() -> FAISSEngine:
+    """Return the global FAISSEngine singleton."""
+    return vector_engine
 

@@ -10,6 +10,7 @@ from PIL import Image
 
 from src.core.logging import log
 from src.core.tenant_context import get_current_tenant_id
+from src.modules.infra.postgres_repository import get_postgres_repo
 
 
 def compute_sha256(image_bytes: bytes) -> str:
@@ -66,17 +67,17 @@ def is_perceptual_duplicate(phash1: str, phash2: str, max_distance: int = 3) -> 
 
 
 def find_duplicate_image(
-    sha256_hash: str,
+    sha256_hash: Optional[str] = None,
     phash: Optional[str] = None,
     tenant_id: Optional[str] = None,
+    sha256: Optional[str] = None,
 ) -> Optional[dict]:
     """
     Looks up existing vector metadata for the tenant to determine if an identical
     or near-duplicate image was already processed and indexed.
     """
-    from src.modules.infra.postgres_repository import get_postgres_repo
-
+    hash_val = sha256 or sha256_hash or ""
     tid = (tenant_id or get_current_tenant_id()).strip()
     repo = get_postgres_repo()
-    return repo.find_duplicate_by_hash(sha256=sha256_hash, phash=phash, tenant_id=tid)
+    return repo.find_duplicate_by_hash(sha256=hash_val, phash=phash, tenant_id=tid)
 

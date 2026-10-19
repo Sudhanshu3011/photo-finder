@@ -49,3 +49,18 @@ async def test_frontend_log_missing_event_fails(client: AsyncClient):
     }
     response = await client.post("/api/log", json=invalid_payload)
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_s3_health_check(client: AsyncClient):
+    """Test developer S3 health check endpoint returns 200 OK and diagnostic status."""
+    response = await client.get("/api/health/s3")
+    assert response.status_code == 200
+    data = response.json()
+    assert "status" in data
+    assert data["status"] in ["healthy", "degraded"]
+    assert "storage" in data
+    assert "bucket" in data
+    assert "latency_ms" in data
+    assert "timestamp" in data
+

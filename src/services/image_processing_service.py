@@ -1,6 +1,7 @@
 import logging
 import uuid
 import os
+import urllib.request
 from typing import Dict, Any, List, Optional
 import cv2
 import numpy as np
@@ -20,8 +21,9 @@ from src.modules.vision.face_detector import detect_faces
 from src.modules.vision.face_embedder import extract_face_embeddings
 from src.modules.vision.object_embedder import extract_object_embedding
 from src.modules.clustering.hdbscan_clusterer import run_hdbscan_clustering, select_cluster_representative
-from src.modules.storage.local_storage import get_image_path
+from src.modules.storage.s3_storage import download_image_from_s3
 from src.core.tenant_context import get_current_tenant_id
+from src.services.inference_client import get_inference_client, InferenceClient
 
 logger = logging.getLogger("src.services.image_processing_service")
 
@@ -32,11 +34,13 @@ class ImageProcessingService:
     Delegates all algorithm details to src.modules.*
     """
 
-    def __init__(self, ai=None, repo=None, engine=None):
+    def __init__(self, ai=None, repo=None, engine=None, inference_client: Optional[InferenceClient] = None):
         self.ai = ai
         self.repo = repo or get_repository()
         self.engine = engine or vector_engine
         self.cache = get_kv_cache()
+        self.inference_client = inference_client or get_inference_client()
+
 
     def process_image_cv(
         self,
@@ -56,15 +60,21 @@ class ImageProcessingService:
                     image_id, folder_name or "general", tid, cv_img.shape[1], cv_img.shape[0])
         
         # 1. Face Detection & Feature Extraction
-        detected_faces = detect_faces(self.ai, cv_img)
+        if self.inference_client is not None:
+            detected_faces = self.inference_client.detect_faces_sync(cv_img)
+        else:
+            detected_faces = detect_faces(self.ai, cv_img)
         faces_saved = 0
 
         for f in detected_faces:
-            target_obj = f if (isinstance(f, dict) and "arcface_vector" in f) else f.get("face_obj", f)
-            if target_obj is None:
-                continue
+            if self.inference_client is not None:
+                emb_data = self.inference_client.extract_face_embeddings_sync(f)
+            else:
+                target_obj = f if (isinstance(f, dict) and "arcface_vector" in f) else f.get("face_obj", f)
+                if target_obj is None:
+                    continue
+                emb_data = extract_face_embeddings(self.ai, target_obj)
 
-            emb_data = extract_face_embeddings(self.ai, target_obj)
             arcface_vec = emb_data.get("arcface_vector")
             adaface_vec = emb_data.get("adaface_vector")
 
@@ -109,8 +119,13 @@ class ImageProcessingService:
                 faces_saved += 1
 
         # 2. Object & Scene Embedding Extraction
-        obj_vec = extract_object_embedding(self.ai, cv_img)
+        if self.inference_client is not None:
+            obj_vec = self.inference_client.extract_scene_embedding_sync(cv_img)
+        else:
+            obj_vec = extract_object_embedding(self.ai, cv_img)
+
         objects_saved = 0
+
         if obj_vec and len(obj_vec) > 0:
             obj_id = f"obj_{image_id}"
             meta = {
@@ -148,24 +163,44 @@ class ImageProcessingService:
         user_id: Optional[str] = None,
         tenant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Load image from cache/disk and process."""
+        """Directly fetch image from AWS S3 bucket and run AI inference / vector indexing."""
         tid = (tenant_id or get_current_tenant_id()).strip()
         meta = self.cache.get(f"meta:{image_id}")
-        local_path = meta.get("local_path") if meta else None
         folder_name = meta.get("folder") if meta else None
         cloud_url = meta.get("cloud_url") if meta else None
+        s3_key = meta.get("s3_key") if meta else None
 
-        if not local_path or not os.path.exists(local_path):
-            local_path = get_image_path(f"{image_id}.jpg")
+        if not s3_key:
+            folder = (folder_name or "general").strip('/')
+            s3_key = f"{tid}/{folder}/{image_id}.jpg"
 
-        if not os.path.exists(local_path):
-            logger.error("[Image Processing] Local image file not found for image_id=%s", image_id)
-            return {"image_id": image_id, "status": "failed", "message": "Image file not found"}
+        cv_img = None
+        try:
+            raw_bytes = download_image_from_s3(s3_key)
+            if raw_bytes:
+                nparr = np.frombuffer(raw_bytes, np.uint8)
+                cv_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        except Exception as e:
+            logger.warning("[Image Processing] Failed to fetch image %s from S3 key '%s': %s", image_id, s3_key, e)
 
-        cv_img = cv2.imread(local_path)
+        # Fallback to cloud_url if direct S3 key retrieval was unsuccessful but URL exists
+        if cv_img is None and cloud_url:
+            try:
+                req = urllib.request.Request(cloud_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    raw_bytes = resp.read()
+                    nparr = np.frombuffer(raw_bytes, np.uint8)
+                    cv_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            except Exception as e:
+                logger.warning("[Image Processing] Failed to fetch image %s from cloud URL '%s': %s", image_id, cloud_url, e)
+
         if cv_img is None:
-            logger.error("[Image Processing] Could not decode image file %s for image_id=%s", local_path, image_id)
-            return {"image_id": image_id, "status": "failed", "message": "Corrupted or undecodable image"}
+            logger.error("[Image Processing] Image could not be retrieved from S3 bucket for image_id=%s (key: %s)", image_id, s3_key)
+            return {
+                "image_id": image_id,
+                "status": "failed",
+                "message": f"Image file could not be retrieved from S3 bucket for key '{s3_key}'",
+            }
 
         return self.process_image_cv(
             image_id=image_id,
@@ -285,6 +320,11 @@ class ImageProcessingService:
             )
             clusters_created += 1
 
+        # Update watermark in cache to record last clustered count
+        if folder_name and folder_name.strip():
+            clean_f = folder_name.strip()
+            self.cache.set(f"cluster_watermark:{tid}:{clean_f}", len(records))
+
         logger.info("[Face Clustering] Finished clustering: discovered %d identity clusters across %d indexed faces (tenant: %s)",
                     clusters_created, len(vectors), tid)
         return {
@@ -294,6 +334,49 @@ class ImageProcessingService:
             "folder": folder_name,
             "tenant_id": tid,
             "message": f"Successfully clustered {len(vectors)} faces into {clusters_created} identity groups"
+        }
+
+    def get_cluster_status(
+        self,
+        folder_name: str,
+        tenant_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Calculates total indexed photos vs. last clustered watermark,
+        returning exact delta and clustering readiness.
+        """
+        tid = (tenant_id or get_current_tenant_id()).strip()
+        clean_folder = (folder_name or "").strip()
+        folder = self.repo.get_folder_by_name(clean_folder, tenant_id=tid) or self.repo.get_folder_by_id(clean_folder, tenant_id=tid)
+        db_photo_count = folder.get("photo_count", 0) if folder else 0
+
+        # Also count face records matching folder
+        records = self.engine.get_all_records(IDX_FACES, tenant_id=tid)
+        folder_records = [
+            r for r in records
+            if (r.get("metadata") or {}).get("folder") == clean_folder
+            or r.get("folder") == clean_folder
+        ]
+        effective_total = max(db_photo_count, len(folder_records))
+
+        watermark_key = f"cluster_watermark:{tid}:{clean_folder}"
+        cached_val = self.cache.get(watermark_key)
+        try:
+            last_clustered_count = int(cached_val) if cached_val is not None else 0
+        except (ValueError, TypeError):
+            last_clustered_count = 0
+
+        delta = max(0, effective_total - last_clustered_count)
+        # Ready if delta >= 25
+        ready = (delta >= 25)
+
+        return {
+            "folder_name": clean_folder,
+            "total_photos": effective_total,
+            "last_clustered_count": last_clustered_count,
+            "new_photos_since_last_cluster": delta,
+            "threshold": 25,
+            "ready_for_clustering": ready,
         }
 
     def get_clusters(

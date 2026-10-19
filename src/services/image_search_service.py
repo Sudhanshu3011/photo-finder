@@ -22,6 +22,7 @@ from src.modules.search.angle_fuser import fuse_angle_embeddings
 from src.modules.vision.face_detector import detect_faces
 from src.modules.vision.face_embedder import extract_face_embeddings
 from src.modules.vision.object_embedder import extract_object_embedding
+from src.services.inference_client import get_inference_client, InferenceClient
 
 logger = logging.getLogger("src.services.image_search_service")
 
@@ -32,9 +33,11 @@ class ImageSearchService:
     and indexing to src.modules.infra.faiss_engine.
     """
 
-    def __init__(self, ai=None, engine=None):
+    def __init__(self, ai=None, engine=None, inference_client: Optional[InferenceClient] = None):
         self.ai = ai
         self.engine = engine or vector_engine
+        self.inference_client = inference_client or get_inference_client()
+
 
     def search_by_face_vector(
         self,
@@ -136,15 +139,24 @@ class ImageSearchService:
         }
 
         # 1. Face lane
-        if search_faces and self.ai is not None:
-            faces = detect_faces(self.ai, cv_img)
+        faces = []
+        if search_faces:
+            if self.inference_client is not None:
+                faces = self.inference_client.detect_faces_sync(cv_img)
+            elif self.ai is not None:
+                faces = detect_faces(self.ai, cv_img)
+
             if faces:
                 results["query_type"] = "face"
                 logger.info("[Image Search] Detected %d face candidate(s) in query image. Proceeding with face search.", len(faces))
                 face_matches_acc = []
                 for idx, f in enumerate(faces):
-                    target_face = f if (isinstance(f, dict) and "arcface_vector" in f) else f.get("face_obj", f)
-                    emb = extract_face_embeddings(self.ai, target_face)
+                    if self.inference_client is not None:
+                        emb = self.inference_client.extract_face_embeddings_sync(f)
+                    else:
+                        target_face = f if (isinstance(f, dict) and "arcface_vector" in f) else f.get("face_obj", f)
+                        emb = extract_face_embeddings(self.ai, target_face)
+
                     arc_vec = emb.get("arcface_vector")
                     ada_vec = emb.get("adaface_vector")
 
@@ -180,9 +192,14 @@ class ImageSearchService:
                 return results
 
         # 2. Object lane
-        if search_objects and self.ai is not None:
+        if search_objects:
             logger.info("[Image Search] No faces detected in query image. Routing to general scene/object visual matching.")
-            obj_vec = extract_object_embedding(self.ai, cv_img)
+            obj_vec = None
+            if self.inference_client is not None:
+                obj_vec = self.inference_client.extract_scene_embedding_sync(cv_img)
+            elif self.ai is not None:
+                obj_vec = extract_object_embedding(self.ai, cv_img)
+
             if obj_vec:
                 results["query_type"] = "object"
                 obj_matches = self.search_by_object_vector(
@@ -196,6 +213,7 @@ class ImageSearchService:
                 results["total_matches"] = len(obj_matches)
                 logger.info("[Image Search] Object search complete. Discovered %d matching photo(s).", len(obj_matches))
                 return results
+
 
         return results
 

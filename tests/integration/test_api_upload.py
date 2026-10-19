@@ -47,3 +47,22 @@ async def test_upload_empty_file_fails(client: AsyncClient):
 
     response = await client.post("/api/upload/photo", files=files)
     assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_upload_images_batch_celery_dispatch(client: AsyncClient):
+    """Test batch upload with use_celery=True dispatches to Celery and returns queued status."""
+    batch_files = [
+        ("files", ("celery_pic1.jpg", create_mock_jpeg(100, 100), "image/jpeg")),
+        ("files", ("celery_pic2.jpg", create_mock_jpeg(100, 100), "image/jpeg")),
+    ]
+
+    response = await client.post("/api/upload/batch", files=batch_files, data={"use_celery": "true"})
+    assert response.status_code == 201
+
+    body = response.json()
+    assert body["total"] == 2
+    assert "job_id" in body
+    assert body["job_id"].startswith("job_")
+    assert isinstance(body["items"], list)
+

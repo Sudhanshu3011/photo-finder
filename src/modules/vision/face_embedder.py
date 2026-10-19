@@ -61,6 +61,27 @@ def extract_face_embeddings(ai_manager, face_obj) -> Dict[str, Any]:
                     adaface_vec = [float(x) for x in ada_emb]
                 has_adaface = True
 
+        # 3. Fallback: if face_obj is a raw crop (np.ndarray or dict with 'crop') and ai_manager is available
+        if arcface_vec is None and ai_manager is not None:
+            raw_crop = face_obj if isinstance(face_obj, np.ndarray) else (face_obj.get("crop") if isinstance(face_obj, dict) else None)
+            if raw_crop is not None and isinstance(raw_crop, np.ndarray) and raw_crop.size > 0:
+                faces = ai_manager._detect_and_encode_faces(raw_crop, is_bgr=True) if hasattr(ai_manager, "_detect_and_encode_faces") else []
+                if faces:
+                    raw_arc = faces[0].get("arcface_vector")
+                    if raw_arc is not None:
+                        arcface_vec = raw_arc.tolist() if hasattr(raw_arc, "tolist") else list(raw_arc)
+                    raw_ada = faces[0].get("adaface_vector")
+                    if raw_ada is not None:
+                        adaface_vec = raw_ada.tolist() if hasattr(raw_ada, "tolist") else list(raw_ada)
+                    has_adaface = faces[0].get("has_adaface", False)
+                elif hasattr(ai_manager, "face_app") and ai_manager.face_app:
+                    raw_faces = ai_manager.face_app.get(raw_crop)
+                    if raw_faces:
+                        emb = getattr(raw_faces[0], "normed_embedding", None) or getattr(raw_faces[0], "embedding", None)
+                        if emb is not None:
+                            norm = np.linalg.norm(emb)
+                            arcface_vec = (emb / norm).tolist() if norm > 0 else emb.tolist()
+
         arc_status = f"{len(arcface_vec)}D" if arcface_vec else "None"
         ada_status = f"{len(adaface_vec)}D" if (adaface_vec and has_adaface) else "None"
         log("INFO", "vision.embedder.face_extracted",

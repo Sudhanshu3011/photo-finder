@@ -1,46 +1,55 @@
+"""
+src/api/auth_routes.py — Authentication, Registration, and Profile Management endpoints.
+Implements decoupled tenant creation (register-tenant), invite previews, locked invite acceptance (accept-invite),
+unified login with multi-tenant disambiguation, and workspace switching.
+"""
 import logging
-from typing import Optional
+from typing import Optional, Union, List
 from fastapi import APIRouter, Depends, HTTPException, status
 from src.schemas.auth_schemas import (
-    RegisterRequest,
+    RegisterTenantRequest,
+    InvitePreviewResponse,
+    AcceptInviteRequest,
     LoginRequest,
     TokenResponse,
+    TenantOptionItem,
+    MultiTenantLoginResponse,
+    SwitchTenantRequest,
     UserProfileResponse,
-    StorageConfigRequest,
-    StorageConfigResponse,
-    CloudinaryConfigRequest,
-    CloudinaryConfigResponse,
 )
 from src.services.user_auth_service import UserAuthService, get_auth_service
 from src.api.dependencies import require_current_user
 from src.modules.infra.kv_cache import get_kv_cache
-from src.modules.storage.s3_storage import get_s3_bucket, ping_s3
 
 logger = logging.getLogger("src.api.auth_routes")
 
 router = APIRouter(prefix="/api/auth", tags=["Authentication & Users"])
 
 
-@router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
-def register_user(
-    req: RegisterRequest,
+# -------------------------------------------------------------------
+# Flow 1: Founding Admin Registration (Creates New Workspace/Tenant)
+# -------------------------------------------------------------------
+@router.post("/register-tenant", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+def register_tenant(
+    req: RegisterTenantRequest,
     service: UserAuthService = Depends(get_auth_service),
 ):
-    """Register a new user account and receive an access token."""
+    """
+    Creates a new organization workspace and registers the caller as 'owner'.
+    Rejects with 409 Conflict if email has an active pending invite elsewhere (unless ignore_pending_invite=True).
+    """
     try:
-        user = service.register(
-            username=req.username,
-            email=req.email,
-            password=req.password,
-            role=req.role or "user",
-            storage_bucket=req.storage_bucket,
-            tenant_id=req.tenant_id or "default",
-        )
+        user = service.register_tenant(req)
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        error_msg = str(e)
+        status_code = status.HTTP_409_CONFLICT if "pending invitation" in error_msg else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=status_code, detail=error_msg)
     except Exception as e:
-        logger.error("[auth_routes.register] Internal error: %s", e)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Registration failed")
+        logger.error("[auth_routes.register_tenant] Failed: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Tenant registration failed: {str(e)}"
+        )
 
     token = service.issue_token(user)
     return TokenResponse(
@@ -48,113 +57,184 @@ def register_user(
         token_type="bearer",
         user_id=user["user_id"],
         username=user["username"],
-        role=user.get("role", "user"),
+        email=user["email"],
+        role=user.get("role", "owner"),
         tenant_id=user.get("tenant_id", "default"),
+        organization_name=user.get("organization_name", req.organization_name),
     )
 
 
-@router.post("/login", response_model=TokenResponse)
+# -------------------------------------------------------------------
+# Flow 2: Invited Member Onboarding (Preview & Accept)
+# -------------------------------------------------------------------
+@router.get("/invites/{invite_token}", response_model=InvitePreviewResponse, status_code=status.HTTP_200_OK)
+def preview_invitation(
+    invite_token: str,
+    service: UserAuthService = Depends(get_auth_service),
+):
+    """
+    Public validation of an invite token.
+    Returns organization name, locked email, and role for the onboarding UI.
+    """
+    try:
+        preview = service.preview_invite(invite_token)
+        return InvitePreviewResponse(**preview)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    except Exception as e:
+        logger.error("[auth_routes.preview_invitation] Failed: %s", e)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to fetch invitation")
+
+
+@router.post("/accept-invite", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+def accept_invitation(
+    req: AcceptInviteRequest,
+    service: UserAuthService = Depends(get_auth_service),
+):
+    """
+    Accepts an invitation, creates member account locked to the invited email,
+    and auto-grants pre-assigned folder permissions atomically.
+    """
+    try:
+        user = service.accept_invite(req)
+    except ValueError as e:
+        error_msg = str(e)
+        status_code = status.HTTP_409_CONFLICT if "already exists" in error_msg or "taken" in error_msg else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(status_code=status_code, detail=error_msg)
+    except Exception as e:
+        logger.error("[auth_routes.accept_invitation] Failed: %s", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Invite acceptance failed: {str(e)}"
+        )
+
+    token = service.issue_token(user)
+    return TokenResponse(
+        access_token=token,
+        token_type="bearer",
+        user_id=user["user_id"],
+        username=user["username"],
+        email=user["email"],
+        role=user.get("role", "viewer"),
+        tenant_id=user.get("tenant_id", "default"),
+        organization_name=user.get("organization_name", "Organization"),
+    )
+
+
+# -------------------------------------------------------------------
+# Flow 3: Unified Login & Multi-Tenant Disambiguation
+# -------------------------------------------------------------------
+@router.post("/login", response_model=Union[TokenResponse, MultiTenantLoginResponse], status_code=status.HTTP_200_OK)
 def login_user(
     req: LoginRequest,
     service: UserAuthService = Depends(get_auth_service),
 ):
-    """Authenticate with username/email and password to obtain an access token."""
-    user = service.authenticate(req.username, req.password)
-    if not user:
+    """
+    Authenticates user credentials.
+    - If user belongs to 1 workspace (or tenant_id provided): returns TokenResponse.
+    - If user belongs to multiple workspaces and tenant_id is omitted: returns MultiTenantLoginResponse
+      listing available workspaces for user selection.
+    """
+    result = service.authenticate(
+        email_or_username=req.email,
+        password=req.password,
+        tenant_id=req.tenant_id,
+    )
+    if not result:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
+            detail="Incorrect email or password",
         )
 
-    token = service.issue_token(user)
+    # Disambiguation needed
+    if isinstance(result, list):
+        options = [
+            TenantOptionItem(
+                tenant_id=u["tenant_id"],
+                organization_name=u.get("organization_name", u["tenant_id"]),
+                role=u.get("role", "viewer"),
+            )
+            for u in result
+        ]
+        return MultiTenantLoginResponse(
+            status="select_tenant",
+            message="Multiple workspace memberships found. Please select which workspace to enter.",
+            available_tenants=options,
+        )
+
+    # Single user authenticated
+    token = service.issue_token(result)
     return TokenResponse(
         access_token=token,
         token_type="bearer",
-        user_id=user["user_id"],
-        username=user["username"],
-        role=user.get("role", "user"),
-        tenant_id=user.get("tenant_id", "default"),
+        user_id=result["user_id"],
+        username=result["username"],
+        email=result["email"],
+        role=result.get("role", "viewer"),
+        tenant_id=result.get("tenant_id", "default"),
+        organization_name=result.get("organization_name", "Organization"),
     )
 
 
-@router.get("/me", response_model=UserProfileResponse)
-def get_current_user_profile(
-    current_user: dict = Depends(require_current_user),
-):
-    """Retrieve profile information for the authenticated user."""
-    return UserProfileResponse(
-        user_id=current_user["user_id"],
-        username=current_user["username"],
-        email=current_user["email"],
-        role=current_user.get("role", "user"),
-        tenant_id=current_user.get("tenant_id", "default"),
-        storage_bucket=current_user.get("storage_bucket") or current_user.get("cloudinary_url"),
-        cloudinary_url=current_user.get("cloudinary_url"),
-        created_at=current_user.get("created_at", ""),
-    )
-
-
-@router.post("/storage-config", response_model=StorageConfigResponse)
-@router.post("/cloudinary-config", response_model=StorageConfigResponse)
-def set_storage_configuration(
-    req: StorageConfigRequest,
+# -------------------------------------------------------------------
+# Flow 4: Workspace Switching
+# -------------------------------------------------------------------
+@router.post("/switch-tenant", response_model=TokenResponse, status_code=status.HTTP_200_OK)
+def switch_workspace(
+    req: SwitchTenantRequest,
     current_user: dict = Depends(require_current_user),
     service: UserAuthService = Depends(get_auth_service),
 ):
     """
-    Configure and verify AWS S3 bucket storage for the authenticated user.
+    Issues a new access token for another authorized workspace the user belongs to.
     """
-    bucket = req.s3_bucket or get_s3_bucket()
+    email = current_user.get("email")
+    if not email:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current session lacks email context")
+
     try:
-        ping_s3(bucket=bucket)
+        switched_user = service.switch_tenant(email=email, target_tenant_id=req.tenant_id)
+    except PermissionError as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"S3 storage connection test failed: {str(e)}"
-        )
+        logger.error("[auth_routes.switch_workspace] Failed: %s", e)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Workspace switch failed")
 
-    service.update_storage_config(current_user["user_id"], bucket)
-
-    cache = get_kv_cache()
-    cache.set(f"user_storage:{current_user['user_id']}", bucket)
-
-    return StorageConfigResponse(
-        status="success",
-        message="AWS S3 storage bucket verified and saved successfully to profile",
-        bucket=bucket,
-        cloud_name=bucket,
-        configured=True,
+    token = service.issue_token(switched_user)
+    return TokenResponse(
+        access_token=token,
+        token_type="bearer",
+        user_id=switched_user["user_id"],
+        username=switched_user["username"],
+        email=switched_user["email"],
+        role=switched_user.get("role", "viewer"),
+        tenant_id=switched_user["tenant_id"],
+        organization_name=switched_user.get("organization_name", "Organization"),
     )
 
 
-@router.get("/storage-config", response_model=StorageConfigResponse)
-@router.get("/cloudinary-config", response_model=StorageConfigResponse)
-def get_storage_configuration(
+# -------------------------------------------------------------------
+# User Profile & S3 Storage Configuration
+# -------------------------------------------------------------------
+@router.get("/me", response_model=UserProfileResponse, status_code=status.HTTP_200_OK)
+def get_current_user_profile(
     current_user: dict = Depends(require_current_user),
+    service: UserAuthService = Depends(get_auth_service),
 ):
-    """Check current S3 object storage configuration status for the authenticated user."""
-    cache = get_kv_cache()
-    bucket = (
-        current_user.get("storage_bucket")
-        or cache.get(f"user_storage:{current_user['user_id']}")
-        or get_s3_bucket()
+    """Retrieve profile information for the authenticated user."""
+    profile = service.get_profile(current_user["user_id"], current_user.get("tenant_id"))
+    user = profile or current_user
+
+    return UserProfileResponse(
+        user_id=user["user_id"],
+        username=user["username"],
+        email=user.get("email", ""),
+        role=user.get("role", "viewer"),
+        tenant_id=user.get("tenant_id", "default"),
+        organization_name=user.get("organization_name", "Organization"),
+        is_active=user.get("is_active", True),
+        storage_bucket=user.get("storage_bucket"),
+        created_at=str(user.get("created_at", "")),
+        last_seen=str(user.get("last_seen", "")),
     )
-
-    if bucket:
-        return StorageConfigResponse(
-            status="success",
-            message=f"AWS S3 storage is configured for {current_user['username']}",
-            bucket=str(bucket),
-            cloud_name=str(bucket),
-            configured=True,
-        )
-    return StorageConfigResponse(
-        status="unconfigured",
-        message="Object storage is not configured",
-        bucket=None,
-        cloud_name=None,
-        configured=False,
-    )
-
-
 

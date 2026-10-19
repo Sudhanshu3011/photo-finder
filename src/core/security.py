@@ -14,7 +14,6 @@ from src.modules.infra.postgres_repository import get_or_create_anonymous_user a
 async def get_verified_keys(
     request: Request,
     x_s3_bucket: Optional[str] = Header(None, alias="X-S3-Bucket"),
-    x_cloudinary_url: Optional[str] = Header(None, alias="X-Cloudinary-Url"),  # Backward compatibility
 ) -> dict:
     """
     Resolved storage credentials dependency:

@@ -10,10 +10,21 @@ from src.modules.storage.s3_storage import upload_image_to_s3, list_s3_objects
 from src.modules.infra.postgres_repository import get_repository
 from src.modules.infra.kv_cache import get_kv_cache
 from src.common.utils import fetch_image_bytes_from_url
+from src.core.config import MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_MB
 
-from celery import chord, chain
-from src.tasks.ingest_tasks import task_process_image_upload, task_batch_completion_callback
-from src.tasks.inference_tasks import task_extract_embeddings
+try:
+    from celery import chord, chain
+    from src.tasks.ingest_tasks import task_process_image_upload, task_batch_completion_callback
+    from src.tasks.inference_tasks import task_extract_embeddings
+    CELERY_AVAILABLE = True
+except ImportError:
+    chord = None
+    chain = None
+    task_process_image_upload = None
+    task_batch_completion_callback = None
+    task_extract_embeddings = None
+    CELERY_AVAILABLE = False
+
 
 logger = logging.getLogger("src.services.photo_upload_service")
 
@@ -80,8 +91,21 @@ class PhotoUploadService:
                 "message": "File is empty"
             }
 
-        # 1. Quality & Dimension check
-        quality = assess_image_quality(contents)
+        # Size check (Max 20MB per image)
+        if len(contents) > MAX_UPLOAD_SIZE_BYTES:
+            size_mb = len(contents) / (1024 * 1024)
+            logger.warning("[photo_upload_service.ingest_single_photo] File %s exceeds %dMB limit (%.1fMB)",
+                           filename, MAX_UPLOAD_SIZE_MB, size_mb)
+            return {
+                "image_id": image_id,
+                "filename": filename,
+                "folder": folder_name,
+                "status": "failed",
+                "message": f"File size exceeds maximum allowed limit of {MAX_UPLOAD_SIZE_MB}MB ({size_mb:.1f}MB uploaded)."
+            }
+
+        # 1. Quality, Format & Dimension check
+        quality = assess_image_quality(contents, filename=filename)
         if not quality["is_valid"]:
             logger.warning("[photo_upload_service.ingest_single_photo] Validation failed for %s: %s", filename, quality["reason"])
             return {
@@ -92,11 +116,12 @@ class PhotoUploadService:
                 "message": quality["reason"]
             }
 
-        # 2. Local Storage
-        local_path = save_image_bytes(contents, f"{image_id}_{filename}")
-        
-        # 3. Cloud Object Storage (AWS S3)
+        # 2. Cloud Object Storage (AWS S3) Primary
         cloud_url = None
+        s3_key = None
+        local_path = None
+        storage_type = "s3"
+
         if save_to_cloud:
             if image_url and ("s3.amazonaws.com" in image_url or "s3." in image_url):
                 cloud_url = image_url
@@ -110,8 +135,15 @@ class PhotoUploadService:
                     )
                     if cloud_res:
                         cloud_url = cloud_res.get("secure_url") or cloud_res.get("url")
+                        s3_key = cloud_res.get("key")
                 except Exception as e:
-                    logger.warning("[photo_upload_service.ingest_single_photo] S3 cloud upload skipped/failed: %s", e)
+                    logger.warning("[photo_upload_service.ingest_single_photo] S3 primary upload failed: %s. Falling back to local storage.", e)
+
+        # 3. Graceful Local Storage Fallback if S3 is unavailable or failed
+        if not cloud_url:
+            local_path = save_image_bytes(contents, f"{image_id}_{filename}")
+            storage_type = "local_fallback"
+            logger.info("[photo_upload_service.ingest_single_photo] Stored asset in local disk fallback at %s", local_path)
 
         # 4. Cache Metadata
         meta = {
@@ -119,6 +151,8 @@ class PhotoUploadService:
             "filename": filename,
             "local_path": local_path,
             "cloud_url": cloud_url,
+            "s3_key": s3_key,
+            "storage_type": storage_type,
             "folder": folder_name,
             "tenant_id": tenant_id or "default",
             "width": quality.get("width"),
@@ -150,7 +184,6 @@ class PhotoUploadService:
         files: List[UploadFile],
         folder_name: str = "general",
         user_id: Optional[str] = None,
-        cloudinary_creds: Optional[dict] = None,
         tenant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -173,7 +206,6 @@ class PhotoUploadService:
                 file=file,
                 folder_name=folder_name,
                 user_id=user_id,
-                cloudinary_creds=cloudinary_creds,
                 tenant_id=tid,
             )
             items.append(res)
@@ -182,7 +214,25 @@ class PhotoUploadService:
             else:
                 failed += 1
 
-        self.repo.update_job(job_id=job_id, processed_images=successful, status="completed" if failed == 0 else "completed_with_errors")
+        job_status = "completed" if failed == 0 else "completed_with_errors"
+        self.repo.update_job(job_id=job_id, processed_images=successful, status=job_status, tenant_id=tid)
+
+        # Cache fast-path lookup in Redis for immediate polling
+        job_data = {
+            "job_id": job_id,
+            "tenant_id": tid,
+            "user_id": user_id or "anonymous",
+            "folder": folder_name,
+            "status": job_status,
+            "current_stage": "completed",
+            "total_files": total,
+            "processed_files": successful,
+            "successful_files": successful,
+            "failed_files": failed,
+            "logs": [f"Batch job {job_id}: {successful}/{total} photos uploaded successfully."],
+        }
+        self.cache.set(f"job:{tid}:{job_id}", job_data)
+        self.cache.set(f"job:{job_id}", job_data)
 
         logger.info("[photo_upload_service.ingest_batch_photos] Completed job %s: %d success, %d failed", job_id, successful, failed)
         return {
@@ -232,15 +282,39 @@ class PhotoUploadService:
         pipelines = []
         for file in files:
             img_id = uuid.uuid4().hex
+            filename = file.filename or f"{img_id}.jpg"
             contents = await file.read()
+
+            # Store original image in AWS S3 (durable single source of truth)
+            payload_ref = None
+            try:
+                cloud_res = upload_image_to_s3(
+                    contents,
+                    folder=folder_name,
+                    key=img_id,
+                    tenant_id=tid,
+                )
+                if cloud_res:
+                    payload_ref = cloud_res.get("key")
+            except Exception as e:
+                logger.warning(
+                    "[photo_upload_service.dispatch_batch_celery] S3 upload failed for %s: %s. Using local fallback.",
+                    img_id,
+                    e,
+                )
+
+            # Fallback to local storage if S3 upload was unavailable
+            if not payload_ref:
+                payload_ref = save_image_bytes(contents, f"{img_id}_{filename}")
+
             pipeline = chain(
                 task_process_image_upload.s(
-                    file_bytes_or_path=contents,
+                    file_bytes_or_path=payload_ref,
                     folder_name=folder_name,
                     user_id=user_id or "anonymous",
                     tenant_id=tid,
                     image_id=img_id,
-                    filename=file.filename or f"{img_id}.jpg",
+                    filename=filename,
                     job_id=job_id,
                 ),
                 task_extract_embeddings.s(),
@@ -303,15 +377,6 @@ class PhotoUploadService:
             "failed": failed,
             "items": items,
         }
-
-    async def sync_from_cloudinary_folder(
-        self,
-        folder_name: str,
-        user_id: Optional[str] = None,
-        cloudinary_creds: Optional[dict] = None,
-    ) -> Dict[str, Any]:
-        """Backward compatibility alias for S3 prefix sync."""
-        return await self.sync_from_s3_prefix(folder_name=folder_name, user_id=user_id)
 
 
 _photo_upload_service_instance: Optional[PhotoUploadService] = None

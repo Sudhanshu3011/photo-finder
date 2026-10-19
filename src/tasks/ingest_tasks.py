@@ -3,13 +3,16 @@ src/tasks/ingest_tasks.py — Distributed Image Ingestion Tasks (queue.ingest).
 Handles raw file validation, SHA256 & pHash deduplication, durable S3 object reference creation,
 atomic multi-counter telemetry, and outcome-aware batch completion.
 """
+import ast
 import io
 import os
 import uuid
+import json
 from typing import Any, Dict, Optional
 
 from celery_app import app
 from src.core.logging import log
+from src.core.config import MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_MB
 from src.core.tenant_context import DEFAULT_TENANT_ID, set_current_tenant_id
 from src.modules.deduplication.image_hasher import (
     compute_phash,
@@ -18,7 +21,13 @@ from src.modules.deduplication.image_hasher import (
 )
 from src.modules.infra.kv_cache import get_kv_cache
 from src.modules.storage.local_storage import save_image_bytes
-from src.modules.storage.s3_storage import check_s3_object_exists, upload_image_to_s3
+from src.modules.storage.s3_storage import (
+    build_s3_url,
+    check_s3_object_exists,
+    download_image_from_s3,
+    get_s3_bucket,
+    upload_image_to_s3,
+)
 from src.modules.vision.image_quality import assess_image_quality
 from src.tasks.base import (
     TenantAwareTask,
@@ -62,20 +71,46 @@ def task_process_image_upload(
     s3_key = f"{tenant_id}/{folder_name.strip('/')}/{s3_filename}"
 
     try:
-        # 1. Read file bytes
+        # 1. Read file bytes (supports durable S3 key reference, local path, or raw bytes)
         if isinstance(file_bytes_or_path, (bytes, bytearray)):
             contents = bytes(file_bytes_or_path)
         elif isinstance(file_bytes_or_path, str) and os.path.exists(file_bytes_or_path):
             with open(file_bytes_or_path, "rb") as f:
                 contents = f.read()
+        elif isinstance(file_bytes_or_path, str) and file_bytes_or_path.strip():
+            # Durable S3 Object Reference: stream bytes on-demand from S3
+            target_key = file_bytes_or_path.strip()
+            if target_key.startswith("s3://"):
+                target_key = target_key.split("/", 3)[-1]
+            contents = download_image_from_s3(target_key)
+            s3_key = target_key
         else:
             raise ValueError(f"Invalid image payload format: {type(file_bytes_or_path)}")
 
         if not contents:
             raise ValueError("Empty image payload received")
 
-        # 2. Quality assessment
-        quality = assess_image_quality(contents)
+        # Size check (Max 20MB per image)
+        if len(contents) > MAX_UPLOAD_SIZE_BYTES:
+            size_mb = len(contents) / (1024 * 1024)
+            reason = f"File size exceeds maximum allowed limit of {MAX_UPLOAD_SIZE_MB}MB ({size_mb:.1f}MB uploaded)."
+            log("WARN", "tasks.ingest.file_too_large", filename=fname, size_mb=round(size_mb, 2))
+            record_task_outcome(
+                job_id=job_id,
+                tenant_id=tenant_id,
+                outcome="failed",
+                log_msg=f"Image '{fname}' rejected: {reason}",
+            )
+            return {
+                "image_id": img_id,
+                "status": "failed",
+                "reason": reason,
+                "tenant_id": tenant_id,
+                "job_id": job_id,
+            }
+
+        # 2. Quality & Format assessment
+        quality = assess_image_quality(contents, filename=fname)
         if not quality.get("is_valid"):
             reason = quality.get("reason", "Corrupted image")
             log("WARN", "tasks.ingest.invalid_quality", filename=fname, reason=reason)
@@ -135,7 +170,6 @@ def task_process_image_upload(
                 if s3_res:
                     cloud_url = s3_res.get("secure_url") or s3_res.get("url")
             else:
-                from src.modules.storage.s3_storage import build_s3_url, get_s3_bucket
                 cloud_url = build_s3_url(s3_key, get_s3_bucket())
         except Exception as e:
             log("WARN", "tasks.ingest.s3_upload_warning", image_id=img_id, error=str(e))
@@ -196,6 +230,16 @@ def task_batch_completion_callback(
     set_current_tenant_id(tenant_id)
     cache = get_kv_cache()
     cached = cache.get(f"job:{tenant_id}:{job_id}") or cache.get(f"job:{job_id}") or {}
+    if isinstance(cached, str):
+        try:
+            cached = json.loads(cached)
+        except Exception:
+            try:
+                cached = ast.literal_eval(cached)
+            except Exception:
+                cached = {}
+    if not isinstance(cached, dict):
+        cached = {}
 
     total = cached.get("total_files", 0)
     successful = cached.get("successful_files", 0)
