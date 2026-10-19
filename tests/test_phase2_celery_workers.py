@@ -182,8 +182,9 @@ def test_durable_s3_reference_cross_pod_execution():
 def test_atomic_multi_counter_telemetry():
     """Verify record_task_outcome updates processed, successful, duplicate, and failed counts."""
     from src.modules.infra.kv_cache import get_kv_cache
+    import uuid
     cache = get_kv_cache()
-    jid = "job_telemetry_test"
+    jid = f"job_telemetry_test_{uuid.uuid4().hex[:8]}"
     tid = "tenant_telem"
 
     # 1. Record successful

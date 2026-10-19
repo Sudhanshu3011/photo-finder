@@ -198,3 +198,18 @@ TRITON_MODEL_DINOV2 = os.getenv("TRITON_MODEL_DINOV2", "dinov2_embedder")
 TRITON_MODEL_SIGLIP = os.getenv("TRITON_MODEL_SIGLIP", "siglip_embedder")
 TRITON_MODEL_SCRFD = os.getenv("TRITON_MODEL_SCRFD", "scrfd_detector")
 TRITON_MODEL_YOLO = os.getenv("TRITON_MODEL_YOLO", "yolo11_segmenter")
+
+# ──────────────────────────────────────────────────────────────
+# CORS Configuration
+# ──────────────────────────────────────────────────────────────
+DEFAULT_CORS_ORIGINS = [
+    "https://photofinderv2.vercel.app",
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://localhost:8000",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:8000",
+]
+_raw_cors = os.getenv("CORS_ALLOWED_ORIGINS", "")
+CORS_ORIGINS = [o.strip() for o in _raw_cors.split(",") if o.strip()] if _raw_cors else DEFAULT_CORS_ORIGINS

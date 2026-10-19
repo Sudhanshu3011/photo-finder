@@ -1,6 +1,7 @@
 import logging
 import uuid
 import os
+import urllib.request
 from typing import Dict, Any, List, Optional
 import cv2
 import numpy as np
@@ -20,7 +21,7 @@ from src.modules.vision.face_detector import detect_faces
 from src.modules.vision.face_embedder import extract_face_embeddings
 from src.modules.vision.object_embedder import extract_object_embedding
 from src.modules.clustering.hdbscan_clusterer import run_hdbscan_clustering, select_cluster_representative
-from src.modules.storage.local_storage import get_image_path
+from src.modules.storage.s3_storage import download_image_from_s3
 from src.core.tenant_context import get_current_tenant_id
 from src.services.inference_client import get_inference_client, InferenceClient
 
@@ -67,13 +68,7 @@ class ImageProcessingService:
 
         for f in detected_faces:
             if self.inference_client is not None:
-                crop = f.get("crop")
-                if crop is None and f.get("bbox"):
-                    x1, y1, x2, y2 = f["bbox"]
-                    crop = cv_img[y1:y2, x1:x2]
-                if crop is None:
-                    crop = cv_img
-                emb_data = self.inference_client.extract_face_embeddings_sync(crop)
+                emb_data = self.inference_client.extract_face_embeddings_sync(f)
             else:
                 target_obj = f if (isinstance(f, dict) and "arcface_vector" in f) else f.get("face_obj", f)
                 if target_obj is None:
@@ -168,24 +163,44 @@ class ImageProcessingService:
         user_id: Optional[str] = None,
         tenant_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Load image from cache/disk and process."""
+        """Directly fetch image from AWS S3 bucket and run AI inference / vector indexing."""
         tid = (tenant_id or get_current_tenant_id()).strip()
         meta = self.cache.get(f"meta:{image_id}")
-        local_path = meta.get("local_path") if meta else None
         folder_name = meta.get("folder") if meta else None
         cloud_url = meta.get("cloud_url") if meta else None
+        s3_key = meta.get("s3_key") if meta else None
 
-        if not local_path or not os.path.exists(local_path):
-            local_path = get_image_path(f"{image_id}.jpg")
+        if not s3_key:
+            folder = (folder_name or "general").strip('/')
+            s3_key = f"{tid}/{folder}/{image_id}.jpg"
 
-        if not os.path.exists(local_path):
-            logger.error("[Image Processing] Local image file not found for image_id=%s", image_id)
-            return {"image_id": image_id, "status": "failed", "message": "Image file not found"}
+        cv_img = None
+        try:
+            raw_bytes = download_image_from_s3(s3_key)
+            if raw_bytes:
+                nparr = np.frombuffer(raw_bytes, np.uint8)
+                cv_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        except Exception as e:
+            logger.warning("[Image Processing] Failed to fetch image %s from S3 key '%s': %s", image_id, s3_key, e)
 
-        cv_img = cv2.imread(local_path)
+        # Fallback to cloud_url if direct S3 key retrieval was unsuccessful but URL exists
+        if cv_img is None and cloud_url:
+            try:
+                req = urllib.request.Request(cloud_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    raw_bytes = resp.read()
+                    nparr = np.frombuffer(raw_bytes, np.uint8)
+                    cv_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            except Exception as e:
+                logger.warning("[Image Processing] Failed to fetch image %s from cloud URL '%s': %s", image_id, cloud_url, e)
+
         if cv_img is None:
-            logger.error("[Image Processing] Could not decode image file %s for image_id=%s", local_path, image_id)
-            return {"image_id": image_id, "status": "failed", "message": "Corrupted or undecodable image"}
+            logger.error("[Image Processing] Image could not be retrieved from S3 bucket for image_id=%s (key: %s)", image_id, s3_key)
+            return {
+                "image_id": image_id,
+                "status": "failed",
+                "message": f"Image file could not be retrieved from S3 bucket for key '{s3_key}'",
+            }
 
         return self.process_image_cv(
             image_id=image_id,
@@ -352,8 +367,8 @@ class ImageProcessingService:
             last_clustered_count = 0
 
         delta = max(0, effective_total - last_clustered_count)
-        # Ready if delta >= 25 or if it is the initial clustering run with at least 5 photos
-        ready = (delta >= 25) or (last_clustered_count == 0 and effective_total >= 5)
+        # Ready if delta >= 25
+        ready = (delta >= 25)
 
         return {
             "folder_name": clean_folder,

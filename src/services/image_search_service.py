@@ -152,13 +152,7 @@ class ImageSearchService:
                 face_matches_acc = []
                 for idx, f in enumerate(faces):
                     if self.inference_client is not None:
-                        crop = f.get("crop")
-                        if crop is None and f.get("bbox"):
-                            x1, y1, x2, y2 = f["bbox"]
-                            crop = cv_img[y1:y2, x1:x2]
-                        if crop is None:
-                            crop = cv_img
-                        emb = self.inference_client.extract_face_embeddings_sync(crop)
+                        emb = self.inference_client.extract_face_embeddings_sync(f)
                     else:
                         target_face = f if (isinstance(f, dict) and "arcface_vector" in f) else f.get("face_obj", f)
                         emb = extract_face_embeddings(self.ai, target_face)

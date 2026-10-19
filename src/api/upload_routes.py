@@ -118,6 +118,7 @@ async def upload_single_photo(
 async def upload_batch_photos(
     files: List[UploadFile] = File(...),
     folder_name: str = Form("general", description="Folder/album name to upload photos into"),
+    use_celery: bool = Form(False, description="Process batch asynchronously through Celery worker fleet"),
     service: PhotoUploadService = Depends(get_upload_service),
     current_user: dict = Depends(require_current_user),
     tenant_id: str = Depends(get_current_tenant_id),
@@ -126,6 +127,7 @@ async def upload_batch_photos(
     """
     Upload and ingest multiple images into a specific folder/album in a single request.
     Enforces folder-level upload permissions.
+    Supports asynchronous Celery worker fleet execution when use_celery is True.
     """
     if not files:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No files provided")
@@ -138,6 +140,21 @@ async def upload_batch_photos(
 
     resolved_folder = _ensure_upload_permission(folder_name, current_user, tenant_id, repo)
     user_id = current_user.get("user_id")
+
+    if use_celery:
+        res = await service.dispatch_batch_celery(
+            files=files,
+            folder_name=resolved_folder,
+            user_id=user_id,
+            tenant_id=tenant_id,
+        )
+        return BatchUploadResponse(
+            job_id=res["job_id"],
+            total=res["total"],
+            successful=0,
+            failed=0,
+            items=[]
+        )
 
     res = await service.ingest_batch_photos(
         files=files,

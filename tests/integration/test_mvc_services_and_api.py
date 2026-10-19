@@ -160,3 +160,27 @@ async def test_storage_config_and_folder_scoping(client: AsyncClient):
     assert c_list.status_code == 200
     assert isinstance(c_list.json(), list)
 
+
+@pytest.mark.asyncio
+async def test_process_image_by_id_direct_s3_retrieval(client: AsyncClient):
+    """Test process_image_by_id fetches directly from S3 bucket without local disk check."""
+    from unittest.mock import patch
+    from src.services.image_processing_service import ImageProcessingService
+
+    service = ImageProcessingService()
+    test_img_bytes = create_mock_jpeg(100, 100)
+
+    # 1. Success case: image fetched directly from S3
+    with patch("src.services.image_processing_service.download_image_from_s3", return_value=test_img_bytes) as mock_s3:
+        res = service.process_image_by_id("img_s3_direct_test", tenant_id="test_tenant")
+        assert res["image_id"] == "img_s3_direct_test"
+        assert res["status"] == "success"
+        mock_s3.assert_called_once_with("test_tenant/general/img_s3_direct_test.jpg")
+
+    # 2. Failure case: image missing in S3 returns failure status
+    with patch("src.services.image_processing_service.download_image_from_s3", side_effect=FileNotFoundError("Not found")):
+        res_fail = service.process_image_by_id("img_s3_missing", tenant_id="test_tenant")
+        assert res_fail["status"] == "failed"
+        assert "could not be retrieved from S3" in res_fail["message"]
+
+

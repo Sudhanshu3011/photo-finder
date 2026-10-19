@@ -10,7 +10,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.core.config import MAX_CONCURRENT_INFERENCES
+from src.core.config import MAX_CONCURRENT_INFERENCES, CORS_ORIGINS
 from src.core.logging import log, init_logging_session, close_logging_session
 from src.api import (
     auth_router,
@@ -63,16 +63,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://photofinderv2.vercel.app",
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://localhost:8000",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:8000",
-    ],
-    allow_origin_regex=r"https?://.*",
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

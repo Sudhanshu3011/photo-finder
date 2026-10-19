@@ -80,10 +80,14 @@ class InferenceClient:
         if isinstance(face_chip_bgr_or_dict, dict):
             # Check for precomputed vectors
             if "arcface_vector" in face_chip_bgr_or_dict and face_chip_bgr_or_dict["arcface_vector"] is not None:
+                raw_arc = face_chip_bgr_or_dict["arcface_vector"]
+                arc_list = raw_arc.tolist() if hasattr(raw_arc, "tolist") else list(raw_arc)
+                raw_ada = face_chip_bgr_or_dict.get("adaface_vector")
+                ada_list = raw_ada.tolist() if hasattr(raw_ada, "tolist") else (list(raw_ada) if raw_ada is not None else None)
                 return {
-                    "arcface_vector": face_chip_bgr_or_dict["arcface_vector"],
-                    "adaface_vector": face_chip_bgr_or_dict.get("adaface_vector"),
-                    "has_adaface": face_chip_bgr_or_dict.get("has_adaface", False),
+                    "arcface_vector": arc_list,
+                    "adaface_vector": ada_list,
+                    "has_adaface": face_chip_bgr_or_dict.get("has_adaface", bool(ada_list)),
                 }
             crop_bgr = face_chip_bgr_or_dict.get("crop")
         elif isinstance(face_chip_bgr_or_dict, np.ndarray):
@@ -124,8 +128,7 @@ class InferenceClient:
         # 2. Local fallback via AIModelManager
         local_mgr = self._get_local_ai_manager()
         from src.modules.vision.face_embedder import extract_face_embeddings as local_extract
-        target = face_chip_bgr_or_dict if isinstance(face_chip_bgr_or_dict, dict) else {"crop": face_chip_bgr_or_dict}
-        return local_extract(local_mgr, target)
+        return local_extract(local_mgr, face_chip_bgr_or_dict)
 
     def extract_face_embeddings_sync(
         self,
@@ -134,11 +137,21 @@ class InferenceClient:
         extract_adaface: bool = True,
     ) -> Dict[str, Any]:
         """Synchronous wrapper for extract_face_embeddings."""
+        if isinstance(face_chip_bgr_or_dict, dict) and "arcface_vector" in face_chip_bgr_or_dict and face_chip_bgr_or_dict["arcface_vector"] is not None:
+            raw_arc = face_chip_bgr_or_dict["arcface_vector"]
+            arc_list = raw_arc.tolist() if hasattr(raw_arc, "tolist") else list(raw_arc)
+            raw_ada = face_chip_bgr_or_dict.get("adaface_vector")
+            ada_list = raw_ada.tolist() if hasattr(raw_ada, "tolist") else (list(raw_ada) if raw_ada is not None else None)
+            return {
+                "arcface_vector": arc_list,
+                "adaface_vector": ada_list,
+                "has_adaface": face_chip_bgr_or_dict.get("has_adaface", bool(ada_list)),
+            }
+
         if self.backend == "local" and self._triton_service is None:
             local_mgr = self._get_local_ai_manager()
             from src.modules.vision.face_embedder import extract_face_embeddings as local_extract
-            target = face_chip_bgr_or_dict if isinstance(face_chip_bgr_or_dict, dict) else {"crop": face_chip_bgr_or_dict}
-            return local_extract(local_mgr, target)
+            return local_extract(local_mgr, face_chip_bgr_or_dict)
         return self._run_sync(self.extract_face_embeddings(face_chip_bgr_or_dict, aligned_chip_nchw, extract_adaface))
 
     async def extract_scene_embedding(self, cv_img: np.ndarray) -> List[float]:

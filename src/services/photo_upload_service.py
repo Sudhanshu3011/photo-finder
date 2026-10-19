@@ -118,6 +118,7 @@ class PhotoUploadService:
 
         # 2. Cloud Object Storage (AWS S3) Primary
         cloud_url = None
+        s3_key = None
         local_path = None
         storage_type = "s3"
 
@@ -134,6 +135,7 @@ class PhotoUploadService:
                     )
                     if cloud_res:
                         cloud_url = cloud_res.get("secure_url") or cloud_res.get("url")
+                        s3_key = cloud_res.get("key")
                 except Exception as e:
                     logger.warning("[photo_upload_service.ingest_single_photo] S3 primary upload failed: %s. Falling back to local storage.", e)
 
@@ -149,6 +151,7 @@ class PhotoUploadService:
             "filename": filename,
             "local_path": local_path,
             "cloud_url": cloud_url,
+            "s3_key": s3_key,
             "storage_type": storage_type,
             "folder": folder_name,
             "tenant_id": tenant_id or "default",
@@ -279,15 +282,39 @@ class PhotoUploadService:
         pipelines = []
         for file in files:
             img_id = uuid.uuid4().hex
+            filename = file.filename or f"{img_id}.jpg"
             contents = await file.read()
+
+            # Store original image in AWS S3 (durable single source of truth)
+            payload_ref = None
+            try:
+                cloud_res = upload_image_to_s3(
+                    contents,
+                    folder=folder_name,
+                    key=img_id,
+                    tenant_id=tid,
+                )
+                if cloud_res:
+                    payload_ref = cloud_res.get("key")
+            except Exception as e:
+                logger.warning(
+                    "[photo_upload_service.dispatch_batch_celery] S3 upload failed for %s: %s. Using local fallback.",
+                    img_id,
+                    e,
+                )
+
+            # Fallback to local storage if S3 upload was unavailable
+            if not payload_ref:
+                payload_ref = save_image_bytes(contents, f"{img_id}_{filename}")
+
             pipeline = chain(
                 task_process_image_upload.s(
-                    file_bytes_or_path=contents,
+                    file_bytes_or_path=payload_ref,
                     folder_name=folder_name,
                     user_id=user_id or "anonymous",
                     tenant_id=tid,
                     image_id=img_id,
-                    filename=file.filename or f"{img_id}.jpg",
+                    filename=filename,
                     job_id=job_id,
                 ),
                 task_extract_embeddings.s(),

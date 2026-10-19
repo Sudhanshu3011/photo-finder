@@ -70,8 +70,13 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
 
     <div class="checkbox-group">
+      <input type="checkbox" id="useCelery" checked onchange="document.getElementById('autoProcessGroup').style.display = this.checked ? 'none' : 'flex'">
+      <label for="useCelery">Process via Celery Worker Fleet (Background Queues &amp; <a href="http://localhost:5555" target="_blank" style="color: #38bdf8; text-decoration: underline;">Flower Dashboard</a>)</label>
+    </div>
+
+    <div class="checkbox-group" id="autoProcessGroup" style="display:none">
       <input type="checkbox" id="autoProcess" checked>
-      <label for="autoProcess">Automatically trigger AI inference & FAISS indexing after upload</label>
+      <label for="autoProcess">Automatically trigger AI inference &amp; FAISS indexing after upload</label>
     </div>
 
     <div class="progress-bar" id="progressBar">
@@ -161,8 +166,12 @@ HTML_PAGE = """<!DOCTYPE html>
       statusText.textContent = `Step 1/2: Uploading ${selectedFiles.length} images to folder '${folder}'...`;
       resultBox.style.display = 'none';
 
+      const useCelery = document.getElementById('useCelery') ? document.getElementById('useCelery').checked : false;
       const formData = new FormData();
       formData.append('folder_name', folder);
+      if (useCelery) {
+        formData.append('use_celery', 'true');
+      }
 
       selectedFiles.forEach(f => {
         formData.append('files', f);
@@ -178,6 +187,44 @@ HTML_PAGE = """<!DOCTYPE html>
         const data = await response.json();
         if (!response.ok) {
           throw new Error(data.detail || 'Upload failed');
+        }
+
+        if (useCelery) {
+          const jobId = data.job_id;
+          statusText.innerHTML = `Celery job queued: <strong>${jobId}</strong>. Monitoring progress... (<a href="http://localhost:5555" target="_blank" style="color:#38bdf8">Open Flower</a>)`;
+          progressFill.style.width = '10%';
+
+          let pollCount = 0;
+          const pollInterval = setInterval(async () => {
+            pollCount++;
+            try {
+              const jobRes = await fetch(`/api/jobs/${jobId}`, { headers: reqHeaders });
+              if (!jobRes.ok) return;
+              const jobData = await jobRes.json();
+              const total = jobData.total_files || jobData.total_images || selectedFiles.length;
+              const processed = jobData.processed_files || jobData.processed_images || 0;
+              const pct = total > 0 ? Math.min(100, Math.round((processed / total) * 100)) : 10;
+              progressFill.style.width = `${pct}%`;
+              statusText.innerHTML = `Celery Workers (${jobData.current_stage || 'processing'}): ${processed}/${total} photos completed (${pct}%)... (<a href="http://localhost:5555" target="_blank" style="color:#38bdf8">View in Flower</a>)`;
+
+              if (jobData.status === 'completed' || jobData.status === 'completed_with_errors' || jobData.status === 'failed') {
+                clearInterval(pollInterval);
+                progressFill.style.width = '100%';
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = 'Complete! Upload Another Batch';
+                statusText.innerHTML = `Job ${jobData.status}! All ${processed} photos indexed into FAISS folder '${folder}'. (<a href="http://localhost:5555" target="_blank" style="color:#38bdf8">Open Flower</a>)`;
+                resultBox.style.display = 'block';
+                resultBox.textContent = JSON.stringify(jobData, null, 2);
+              } else if (pollCount >= 180) {
+                clearInterval(pollInterval);
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = 'Job Still Running in Background';
+              }
+            } catch (pollErr) {
+              console.error('Polling error:', pollErr);
+            }
+          }, 1000);
+          return;
         }
 
         progressFill.style.width = '50%';

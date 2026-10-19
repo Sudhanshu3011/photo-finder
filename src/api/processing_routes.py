@@ -186,12 +186,11 @@ def rename_face_cluster(
 @router.get("/api/jobs/{job_id}", response_model=JobProgressResponse, status_code=status.HTTP_200_OK, tags=["Photo Upload & Ingestion"])
 async def get_job_progress(
     job_id: str,
-    tenant_id: Optional[str] = Query(None, description="Optional tenant ID context"),
     current_user: Optional[dict] = Depends(get_current_user),
     ctx_tenant_id: str = Depends(get_current_tenant_id),
 ):
     """Check the status and progress of an asynchronous batch processing job."""
-    eff_tenant = (tenant_id or ctx_tenant_id or "default").strip()
+    eff_tenant = (ctx_tenant_id or "default").strip()
     job = await fetch_job_status(job_id, tenant_id=eff_tenant)
     if not job:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found")

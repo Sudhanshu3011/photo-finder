@@ -3,6 +3,8 @@ src/tasks/base.py — Base Celery Task with Multi-Tenant Context Isolation & Str
 Guarantees that every task executed across distributed worker pools binds its execution context
 to the correct tenant_id before start and cleans up contextvars upon completion.
 """
+import ast
+import json
 from typing import Any, Optional
 try:
     import celery
@@ -127,6 +129,14 @@ def record_task_outcome(
         cache = get_kv_cache()
         key = f"job:{tenant_id}:{job_id}"
         cached = cache.get(key) or cache.get(f"job:{job_id}") or {}
+        if isinstance(cached, str):
+            try:
+                cached = json.loads(cached)
+            except Exception:
+                try:
+                    cached = ast.literal_eval(cached)
+                except Exception:
+                    cached = {}
         if not isinstance(cached, dict):
             cached = {}
 

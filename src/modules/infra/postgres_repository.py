@@ -1117,9 +1117,9 @@ class PostgresRepository:
         if pool:
             async def _get():
                 async with get_tenant_connection(tid) as conn:
-                    query = "SELECT * FROM face_clusters WHERE 1=1"
-                    params = []
-                    idx = 1
+                    query = "SELECT * FROM face_clusters WHERE tenant_id = $1"
+                    params = [tid]
+                    idx = 2
                     if folder:
                         query += f" AND folder = ${idx}"
                         params.append(folder)
@@ -1214,6 +1214,15 @@ class PostgresRepository:
                     if phash and item_phash and item_phash == phash:
                         return dict(item)
             return None
+
+    def save_batch_metadata(
+        self,
+        index_name: str,
+        records: List[dict],
+        tenant_id: Optional[str] = None,
+    ) -> List[int]:
+        """Insert or update a batch of vector metadata records in PostgreSQL or in-memory fallback."""
+        return sync_save_vector_metadata_batch(index_name, records, tenant_id=tenant_id)
 
     # ===============================================================
     # Enterprise Multi-Tenant, RBAC & Folder ACL Operations
