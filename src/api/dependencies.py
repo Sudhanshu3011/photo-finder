@@ -65,25 +65,26 @@ def require_current_user(
 def get_current_tenant_id(
     request: Request,
     current_user: Optional[Dict[str, Any]] = Depends(get_current_user),
-    x_tenant_id: Optional[str] = Header(None, alias="X-Tenant-ID"),
 ) -> str:
     """
-    Extract and enforce tenant context.
+    Extract and enforce tenant context without cluttering endpoint documentation.
     Priority:
     1. Authenticated user's tenant_id (cryptographically signed in JWT)
-    2. Explicit X-Tenant-ID header (for API keys or service-to-service)
+    2. Explicit X-Tenant-ID header (read directly from request headers)
     3. request.state.tenant_id if set by middleware
     4. Default fallback: 'default'
     """
     tenant_id = "default"
     if current_user and current_user.get("tenant_id"):
         tenant_id = str(current_user["tenant_id"]).strip()
-    elif x_tenant_id and x_tenant_id.strip():
-        tenant_id = x_tenant_id.strip()
-    elif request.query_params.get("tenant_id") and request.query_params.get("tenant_id").strip():
-        tenant_id = request.query_params.get("tenant_id").strip()
-    elif hasattr(request.state, "tenant_id") and request.state.tenant_id:
-        tenant_id = str(request.state.tenant_id).strip()
+    else:
+        raw_header = request.headers.get("x-tenant-id") or request.headers.get("X-Tenant-ID")
+        if raw_header and raw_header.strip():
+            tenant_id = raw_header.strip()
+        elif request.query_params.get("tenant_id") and request.query_params.get("tenant_id").strip():
+            tenant_id = request.query_params.get("tenant_id").strip()
+        elif hasattr(request.state, "tenant_id") and request.state.tenant_id:
+            tenant_id = str(request.state.tenant_id).strip()
 
     request.state.tenant_id = tenant_id
     set_current_tenant_id(tenant_id)

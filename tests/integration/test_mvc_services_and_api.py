@@ -120,7 +120,8 @@ async def test_image_search_service(client: AsyncClient):
     query_bytes = create_mock_jpeg(120, 120)
     files = {"file": ("query.jpg", query_bytes, "image/jpeg")}
     
-    search_resp = await client.post("/api/search/image?top_k=10", files=files)
+    data = {"folder_name": "general"}
+    search_resp = await client.post("/api/search/image?top_k=10", files=files, data=data)
     assert search_resp.status_code == 200
     s_data = search_resp.json()
     assert "query_type" in s_data

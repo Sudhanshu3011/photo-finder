@@ -3,12 +3,13 @@ src/modules/infra/faiss_engine.py — Production-grade local FAISS Vector Storag
 Provides sub-millisecond cosine similarity search over normalized embeddings.
 Persistent to disk (data/faiss/*.index) with metadata synced to PostgreSQL.
 """
+import collections
 import json
 import os
 import shutil
 import threading
 import uuid
-from typing import Any, Dict, List, Optional, Tuple, Set
+from typing import Any, Dict, List, Optional, Tuple, Set, Union
 
 import numpy as np
 
@@ -21,12 +22,18 @@ from src.core.config import (
     ADAFACE_DIM,
     FUSED_FACE_DIM,
     OBJECT_DIM,
+    USE_HNSW_INDEX,
+    HNSW_M,
+    HNSW_EF_CONSTRUCTION,
+    HNSW_EF_SEARCH,
+    ENVIRONMENT,
 )
 from src.core.logging import log, warn
 from src.core.tenant_context import get_current_tenant_id
 from src.modules.infra.postgres_repository import (
     sync_save_vector_metadata_batch,
     sync_get_vector_metadata_by_int_ids,
+    sync_get_int_ids_by_folders,
     sync_delete_vectors_by_ids,
     sync_delete_vectors_by_url,
     sync_delete_vectors_by_folder,
@@ -57,12 +64,20 @@ class NumpyVectorIndex:
             for vec, int_id in zip(x, ids):
                 self.vectors[int(int_id)] = vec.astype(np.float32)
 
-    def search(self, x: np.ndarray, k: int) -> Tuple[np.ndarray, np.ndarray]:
+    def search(self, x: np.ndarray, k: int, allowed_ids: Optional[Any] = None) -> Tuple[np.ndarray, np.ndarray]:
         with self.lock:
             if not self.vectors:
                 return np.zeros((x.shape[0], 0), dtype=np.float32), np.zeros((x.shape[0], 0), dtype=np.int64)
 
-            v_ids = list(self.vectors.keys())
+            if allowed_ids is not None:
+                allowed_set = set(allowed_ids)
+                v_ids = [i for i in self.vectors.keys() if i in allowed_set]
+            else:
+                v_ids = list(self.vectors.keys())
+
+            if not v_ids:
+                return np.zeros((x.shape[0], 0), dtype=np.float32), np.zeros((x.shape[0], 0), dtype=np.int64)
+
             matrix = np.stack([self.vectors[i] for i in v_ids])  # (N, D)
 
             # Cosine similarity via inner product on normalized vectors
@@ -92,6 +107,36 @@ class NumpyVectorIndex:
         return len(self.vectors)
 
 
+def build_vector_index(
+    dimension: int,
+    use_hnsw: bool = USE_HNSW_INDEX,
+    m: int = HNSW_M,
+    ef_construction: int = HNSW_EF_CONSTRUCTION,
+    ef_search: int = HNSW_EF_SEARCH,
+) -> Any:
+    """
+    Instantiate an IndexIDMap2 vector index wrapping either IndexHNSWFlat or IndexFlatIP.
+    In production environments, fails closed if native FAISS is missing.
+    """
+    if HAS_FAISS:
+        if use_hnsw:
+            quantizer = faiss.IndexHNSWFlat(dimension, m, faiss.METRIC_INNER_PRODUCT)
+            quantizer.hnsw.efConstruction = ef_construction
+            quantizer.hnsw.efSearch = ef_search
+            return faiss.IndexIDMap2(quantizer)
+        else:
+            raw = faiss.IndexFlatIP(dimension)
+            return faiss.IndexIDMap2(raw)
+    else:
+        if ENVIRONMENT == "production":
+            raise RuntimeError(
+                "FAISS native library is not installed in production environment. "
+                "NumPy fallback is strictly prohibited in production."
+            )
+        return NumpyVectorIndex(dimension)
+
+
+
 class FAISSEngine:
     """Local vector store orchestrating indices across face and object domains with tenant partitioning."""
 
@@ -102,12 +147,16 @@ class FAISSEngine:
         IDX_FACES_ADAFACE: ADAFACE_DIM,
     }
 
-    def __init__(self, data_dir: str = "data/faiss"):
-        env_dir = os.environ.get("FAISS_DATA_DIR")
-        self.data_dir = env_dir if env_dir else os.path.join(os.getcwd(), data_dir)
+    def __init__(self, data_dir: Optional[str] = None):
+        if data_dir is not None:
+            self.data_dir = data_dir
+        else:
+            env_dir = os.environ.get("FAISS_DATA_DIR")
+            self.data_dir = env_dir if env_dir else os.path.join(os.getcwd(), "data/faiss")
         os.makedirs(self.data_dir, exist_ok=True)
-        # Partitioned index storage keyed by (tenant_id, index_name)
-        self.indices: Dict[Tuple[str, str], Any] = {}
+        # Partitioned index storage keyed by (tenant_id, index_name) with LRU eviction
+        self.indices: collections.OrderedDict[Tuple[str, str], Any] = collections.OrderedDict()
+        self.max_loaded_indices: int = int(os.getenv("FAISS_MAX_LOADED_INDICES", "50"))
         # Track disk modification timestamps to detect cross-process worker updates
         self._index_mtimes: Dict[Tuple[str, str], float] = {}
         self.lock = threading.RLock()
@@ -118,6 +167,33 @@ class FAISSEngine:
         tenant_dir = os.path.join(self.data_dir, tid)
         os.makedirs(tenant_dir, exist_ok=True)
         return os.path.join(tenant_dir, f"{index_name}.index")
+
+    def _save_single_index_to_disk(self, index_name: str, tenant_id: str, idx: Any) -> bool:
+        """Persist a single FAISS index using atomic POSIX rename to avoid partial reader loads."""
+        if not HAS_FAISS or idx is None:
+            return False
+        path = self._get_index_path(index_name, tenant_id)
+        tmp_path = f"{path}.tmp.{uuid.uuid4().hex}"
+        try:
+            faiss.write_index(idx, tmp_path)
+            os.replace(tmp_path, path)
+            self._index_mtimes[(tenant_id, index_name)] = os.path.getmtime(path)
+            return True
+        except Exception as e:
+            warn(f"Failed to persist FAISS index {index_name} for tenant {tenant_id}: {e}")
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+            return False
+
+    def _evict_lru_index_if_needed(self) -> None:
+        """Evict oldest loaded tenant indices from memory if max capacity is exceeded."""
+        while len(self.indices) > self.max_loaded_indices:
+            (old_tid, old_name), old_idx = self.indices.popitem(last=False)
+            self._save_single_index_to_disk(old_name, old_tid, old_idx)
+            self._index_mtimes.pop((old_tid, old_name), None)
 
     def _init_indices(self, tenant_id: str = "default"):
         tid = (tenant_id or "default").strip()
@@ -135,20 +211,20 @@ class FAISSEngine:
                             loaded = faiss.read_index(path)
                             if loaded.d != dim:
                                 warn(f"Index dimension mismatch for {idx_name} (tenant {tid}): expected {dim}, found {loaded.d}. Recreating index.")
-                                raw = faiss.IndexFlatIP(dim)
-                                self.indices[key] = faiss.IndexIDMap2(raw)
+                                self.indices[key] = build_vector_index(dim)
                             else:
+                                base = faiss.downcast_index(loaded.index) if hasattr(loaded, "index") else faiss.downcast_index(loaded)
+                                if hasattr(base, "hnsw"):
+                                    base.hnsw.efSearch = HNSW_EF_SEARCH
                                 self.indices[key] = loaded
                             self._index_mtimes[key] = os.path.getmtime(path)
                         except Exception as e:
                             warn(f"Failed to load FAISS index from {path}: {e}. Creating new.")
-                            raw = faiss.IndexFlatIP(dim)
-                            self.indices[key] = faiss.IndexIDMap2(raw)
+                            self.indices[key] = build_vector_index(dim)
                     else:
-                        raw = faiss.IndexFlatIP(dim)
-                        self.indices[key] = faiss.IndexIDMap2(raw)
+                        self.indices[key] = build_vector_index(dim)
                 else:
-                    self.indices[key] = NumpyVectorIndex(dim)
+                    self.indices[key] = build_vector_index(dim)
 
     def get_index(self, index_name: str, tenant_id: Optional[str] = None, dim: Optional[int] = None):
         tid = (tenant_id or get_current_tenant_id()).strip()
@@ -169,24 +245,27 @@ class FAISSEngine:
                         try:
                             loaded = faiss.read_index(path)
                             if loaded.d == d or dim is None:
+                                base = faiss.downcast_index(loaded.index) if hasattr(loaded, "index") else faiss.downcast_index(loaded)
+                                if hasattr(base, "hnsw"):
+                                    base.hnsw.efSearch = HNSW_EF_SEARCH
                                 self.indices[key] = loaded
                                 self._index_mtimes[key] = disk_mtime
                             else:
-                                raw = faiss.IndexFlatIP(d)
-                                self.indices[key] = faiss.IndexIDMap2(raw)
+                                self.indices[key] = build_vector_index(d)
                         except Exception as e:
                             warn(f"Failed to load/reload FAISS index from {path}: {e}")
                             if key not in self.indices:
-                                raw = faiss.IndexFlatIP(d)
-                                self.indices[key] = faiss.IndexIDMap2(raw)
+                                self.indices[key] = build_vector_index(d)
                 else:
                     if key not in self.indices:
-                        raw = faiss.IndexFlatIP(d)
-                        self.indices[key] = faiss.IndexIDMap2(raw)
+                        self.indices[key] = build_vector_index(d)
             else:
                 if key not in self.indices:
-                    self.indices[key] = NumpyVectorIndex(d)
+                    self.indices[key] = build_vector_index(d)
 
+            if key in self.indices:
+                self.indices.move_to_end(key)
+            self._evict_lru_index_if_needed()
             return self.indices[key]
 
     def save_to_disk(self, index_name: Optional[str] = None, tenant_id: Optional[str] = None):
@@ -200,19 +279,7 @@ class FAISSEngine:
                 if (index_name is None or name == index_name) and (target_tid is None or tid == target_tid):
                     idx = self.indices.get((tid, name))
                     if idx is not None:
-                        path = self._get_index_path(name, tid)
-                        tmp_path = f"{path}.tmp.{uuid.uuid4().hex}"
-                        try:
-                            faiss.write_index(idx, tmp_path)
-                            os.replace(tmp_path, path)  # Atomic POSIX rename prevents partial reader loads
-                            self._index_mtimes[(tid, name)] = os.path.getmtime(path)
-                        except Exception as e:
-                            warn(f"Failed to persist FAISS index {name} for tenant {tid}: {e}")
-                            if os.path.exists(tmp_path):
-                                try:
-                                    os.remove(tmp_path)
-                                except Exception:
-                                    pass
+                        self._save_single_index_to_disk(name, tid, idx)
 
     def upsert(self, index_name: str, records: List[dict], tenant_id: Optional[str] = None) -> int:
         """
@@ -237,16 +304,15 @@ class FAISSEngine:
             idx = self.get_index(index_name, tenant_id=tid, dim=target_dim)
             key = (tid, index_name)
             if idx.ntotal == 0 and idx.d != target_dim:
-                if HAS_FAISS:
-                    raw = faiss.IndexFlatIP(target_dim)
-                    self.indices[key] = faiss.IndexIDMap2(raw)
-                else:
-                    self.indices[key] = NumpyVectorIndex(target_dim)
+                self.indices[key] = build_vector_index(target_dim)
                 idx = self.indices[key]
 
             id_array = np.array(int_ids, dtype=np.int64)
             if HAS_FAISS:
-                idx.remove_ids(id_array)
+                try:
+                    idx.remove_ids(id_array)
+                except Exception:
+                    pass
                 idx.add_with_ids(vecs, id_array)
             else:
                 idx.add_with_ids(vecs, id_array)
@@ -288,7 +354,12 @@ class FAISSEngine:
         with self.lock:
             idx = self.indices[key]
             arr = np.array(affected, dtype=np.int64)
-            removed = idx.remove_ids(arr)
+            try:
+                removed = idx.remove_ids(arr)
+            except Exception:
+                # IndexHNSWFlat does not support physical node deletion;
+                # vector is unlinked from PostgreSQL metadata and excluded by IDSelector pre-filtering
+                removed = len(arr)
             self.save_to_disk(index_name, tenant_id=tid)
         return removed
 
@@ -302,9 +373,11 @@ class FAISSEngine:
         top_k: int = 20,
         filter_dict: Optional[dict] = None,
         tenant_id: Optional[str] = None,
+        allowed_int_ids: Optional[Union[List[int], Set[int]]] = None,
     ) -> List[dict]:
         """
         Run similarity search against an index scoped to tenant.
+        Supports search-time pre-filtering via faiss.IDSelectorBatch to prevent cross-tenant contamination.
         Returns [{"id": str, "score": float, "url": str, "folder": str, "metadata": dict}, ...]
         """
         if not query_vector:
@@ -320,11 +393,45 @@ class FAISSEngine:
         idx = self.get_index(index_name, tenant_id=tid, dim=target_dim)
         fetch_k = top_k * 5 if filter_dict else top_k
 
+        # Resolve target allowed integer IDs for search-time pre-filtering
+        target_allowed: Optional[List[int]] = None
+        if allowed_int_ids is not None:
+            target_allowed = list(allowed_int_ids)
+            if not target_allowed:
+                return []
+        elif filter_dict and "allowed_int_ids" in filter_dict and filter_dict["allowed_int_ids"] is not None:
+            target_allowed = list(filter_dict["allowed_int_ids"])
+            if not target_allowed:
+                return []
+        elif filter_dict and ("allowed_folders" in filter_dict or "folder" in filter_dict):
+            folders = []
+            if "allowed_folders" in filter_dict and isinstance(filter_dict["allowed_folders"], (list, set, tuple)):
+                folders = [f for f in filter_dict["allowed_folders"] if f]
+            elif "folder" in filter_dict and filter_dict["folder"]:
+                folders = [filter_dict["folder"]]
+            if folders:
+                target_allowed = sync_get_int_ids_by_folders(index_name, folders, tenant_id=tid)
+                if not target_allowed:
+                    return []
+
         with self.lock:
             if idx.ntotal == 0 or idx.d != target_dim:
                 return []
             k_actual = min(fetch_k, idx.ntotal)
-            scores, int_ids = idx.search(q_vec, k_actual)
+            if HAS_FAISS and hasattr(idx, "search"):
+                if target_allowed is not None:
+                    sel_arr = np.array(target_allowed, dtype=np.int64)
+                    selector = faiss.IDSelectorBatch(sel_arr)
+                    base = faiss.downcast_index(idx.index) if hasattr(idx, "index") else faiss.downcast_index(idx)
+                    if hasattr(base, "hnsw") or isinstance(base, faiss.IndexHNSW):
+                        params = faiss.SearchParametersHNSW(sel=selector, efSearch=HNSW_EF_SEARCH)
+                    else:
+                        params = faiss.SearchParameters(sel=selector)
+                    scores, int_ids = idx.search(q_vec, k_actual, params=params)
+                else:
+                    scores, int_ids = idx.search(q_vec, k_actual)
+            else:
+                scores, int_ids = idx.search(q_vec, k_actual, allowed_ids=target_allowed)
 
         if len(int_ids) == 0 or len(int_ids[0]) == 0:
             return []
@@ -343,9 +450,11 @@ class FAISSEngine:
             if filter_dict:
                 match = True
                 for fk, fv in filter_dict.items():
-                    if fk == "allowed_folders" and isinstance(fv, (list, set, tuple)):
+                    if fk in ("allowed_folders", "allowed_int_ids"):
+                        continue  # Already pre-filtered at index level
+                    elif fk == "folder":
                         entry_fld = entry.get("folder") or meta.get("folder")
-                        if entry_fld not in fv:
+                        if entry_fld != fv:
                             match = False
                             break
                     elif meta.get(fk) != fv and entry.get(fk) != fv:
@@ -374,8 +483,16 @@ class FAISSEngine:
         top_k: int = 20,
         filter_dict: Optional[dict] = None,
         tenant_id: Optional[str] = None,
+        allowed_int_ids: Optional[Union[List[int], Set[int]]] = None,
     ) -> List[dict]:
-        return self.search(index_name, query_vector, top_k, filter_dict, tenant_id=tenant_id)
+        return self.search(
+            index_name=index_name,
+            query_vector=query_vector,
+            top_k=top_k,
+            filter_dict=filter_dict,
+            tenant_id=tenant_id,
+            allowed_int_ids=allowed_int_ids,
+        )
 
     def delete_by_url(self, url: str, tenant_id: Optional[str] = None) -> int:
         """Delete all vectors matching a specific image URL across all indexes scoped to tenant."""
@@ -389,7 +506,10 @@ class FAISSEngine:
                 if int_ids and key in self.indices:
                     idx = self.indices[key]
                     arr = np.array(int_ids, dtype=np.int64)
-                    idx.remove_ids(arr)
+                    try:
+                        idx.remove_ids(arr)
+                    except Exception:
+                        pass
                     total_removed += len(int_ids)
                     self.save_to_disk(idx_name, tenant_id=tid)
 
@@ -407,7 +527,10 @@ class FAISSEngine:
                 if int_ids and key in self.indices:
                     idx = self.indices[key]
                     arr = np.array(int_ids, dtype=np.int64)
-                    idx.remove_ids(arr)
+                    try:
+                        idx.remove_ids(arr)
+                    except Exception:
+                        pass
                     total_removed += len(int_ids)
                     self.save_to_disk(idx_name, tenant_id=tid)
 

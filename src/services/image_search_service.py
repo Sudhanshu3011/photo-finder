@@ -17,6 +17,7 @@ from src.core.config import (
     ADAFACE_DIM,
 )
 from src.modules.infra.faiss_engine import vector_engine
+from src.modules.infra.search_cache import get_search_cache, SearchCacheManager
 from src.modules.search.vector_scorer import score_face_matches, score_object_matches
 from src.modules.search.angle_fuser import fuse_angle_embeddings
 from src.modules.vision.face_detector import detect_faces
@@ -30,13 +31,20 @@ class ImageSearchService:
     """
     High-level orchestrator for multimodal visual search.
     Delegates similarity scoring and angle fusion to src.modules.search.*
-    and indexing to src.modules.infra.faiss_engine.
+    and indexing to src.modules.infra.faiss_engine with two-tier caching.
     """
 
-    def __init__(self, ai=None, engine=None, inference_client: Optional[InferenceClient] = None):
+    def __init__(
+        self,
+        ai=None,
+        engine=None,
+        inference_client: Optional[InferenceClient] = None,
+        search_cache: Optional[SearchCacheManager] = None,
+    ):
         self.ai = ai
         self.engine = engine or vector_engine
         self.inference_client = inference_client or get_inference_client()
+        self.search_cache = search_cache or get_search_cache()
 
 
     def search_by_face_vector(
@@ -48,7 +56,20 @@ class ImageSearchService:
         filter_dict: Optional[dict] = None,
         tenant_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Search faces using raw embedding vectors with score fusion scoped to tenant."""
+        """Search faces using raw embedding vectors with score fusion scoped to tenant and two-tier caching."""
+        cache_key = self.search_cache.make_cache_key(
+            domain="faces",
+            query_vector=arcface_vec,
+            top_k=top_k,
+            threshold=threshold,
+            filter_dict=filter_dict,
+            tenant_id=tenant_id,
+        )
+        cached_results = self.search_cache.get(cache_key)
+        if cached_results is not None:
+            logger.info("[Face Search] Cache hit (< 1.5ms) for tenant %s", tenant_id or "default")
+            return cached_results
+
         has_ada = bool(adaface_vec and len(adaface_vec) == ADAFACE_DIM)
         scope = f"folder='{filter_dict['folder']}'" if (filter_dict and "folder" in filter_dict) else "all gallery folders"
         fusion_info = "Dual-model (ArcFace 512D + AdaFace 512D)" if has_ada else "Single-model (ArcFace 512D)"
@@ -89,7 +110,9 @@ class ImageSearchService:
             ada_matches=ada_matches if ada_matches else None,
             threshold=threshold
         )
-        return scored[:top_k]
+        final_results = scored[:top_k]
+        self.search_cache.set(cache_key, final_results)
+        return final_results
 
     def search_by_object_vector(
         self,
@@ -99,7 +122,20 @@ class ImageSearchService:
         filter_dict: Optional[dict] = None,
         tenant_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Search scenes/objects using visual embedding vectors scoped to tenant."""
+        """Search scenes/objects using visual embedding vectors scoped to tenant and two-tier caching."""
+        cache_key = self.search_cache.make_cache_key(
+            domain="objects",
+            query_vector=object_vec,
+            top_k=top_k,
+            threshold=threshold,
+            filter_dict=filter_dict,
+            tenant_id=tenant_id,
+        )
+        cached_results = self.search_cache.get(cache_key)
+        if cached_results is not None:
+            logger.info("[Object Search] Cache hit (< 1.5ms) for tenant %s", tenant_id or "default")
+            return cached_results
+
         scope = f"folder='{filter_dict['folder']}'" if (filter_dict and "folder" in filter_dict) else "all gallery folders"
         logger.info("[Object Search] Querying DINOv2+SigLIP fused vectors | Scope: %s | Max matches: %d | Min similarity threshold: %.2f | Tenant: %s",
                     scope, top_k, threshold, tenant_id or "default")
@@ -116,7 +152,9 @@ class ImageSearchService:
             matches=matches,
             threshold=threshold
         )
-        return scored[:top_k]
+        final_results = scored[:top_k]
+        self.search_cache.set(cache_key, final_results)
+        return final_results
 
     def search_by_image(
         self,

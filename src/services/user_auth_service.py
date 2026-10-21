@@ -265,11 +265,12 @@ class UserAuthService:
     # Token & Cache Management
     # -------------------------------------------------------------------
     def issue_token(self, user: Dict[str, Any]) -> str:
-        """Issue a JWT access token and cache user credentials in Redis for instant revocation."""
+        """Issue a JWT access token stamped with token_version and cache credentials in Redis."""
         tid = user.get("tenant_id") or "default"
         uid = user["user_id"]
         role = user.get("role", "viewer")
         org_name = user.get("organization_name", "")
+        token_ver = int(user.get("token_version", 1))
 
         token_data = {
             "sub": uid,
@@ -278,21 +279,23 @@ class UserAuthService:
             "role": role,
             "tenant_id": tid,
             "org": org_name,
+            "token_version": token_ver,
         }
-        token = create_access_token(data=token_data, tenant_id=tid)
+        token = create_access_token(data=token_data, tenant_id=tid, token_version=token_ver)
 
         # Cache in Redis with 5-minute TTL to mitigate Trap 3 (Stale JWT Claims)
         try:
             cache = get_kv_cache()
             cache.set(f"user_auth:{tid}:{uid}", f"{role}:active", ttl=300)
+            cache.set(f"user_token_version:{tid}:{uid}", str(token_ver), ttl=86400)
         except Exception:
             pass
 
-        logger.info("[user_auth_service.issue_token] Issued token for user_id=%s, tenant_id=%s", uid, tid)
+        logger.info("[user_auth_service.issue_token] Issued token for user_id=%s, tenant_id=%s, token_version=%d", uid, tid, token_ver)
         return token
 
     def verify_token(self, token: str) -> Optional[Dict[str, Any]]:
-        """Validate token and verify active status with cache or DB."""
+        """Validate token signature, verify active status with cache or DB, and reject stale token versions."""
         payload = decode_access_token(token)
         if not payload or "sub" not in payload:
             logger.warning("[user_auth_service.verify_token] Invalid or expired token")
@@ -300,6 +303,7 @@ class UserAuthService:
 
         uid = payload["sub"]
         tid = payload.get("tenant_id", "default")
+        token_ver = int(payload.get("token_version", 1))
 
         # Check instant revocation in cache if present
         try:
@@ -309,7 +313,16 @@ class UserAuthService:
                 parts = str(cached_auth).split(":")
                 status = parts[1] if len(parts) > 1 else "active"
                 if status == "revoked":
+                    logger.warning("[user_auth_service.verify_token] Token rejected by cache revocation for user=%s", uid)
                     return None
+
+            cached_ver = cache.get(f"user_token_version:{tid}:{uid}")
+            if cached_ver is not None and int(cached_ver) > token_ver:
+                logger.warning(
+                    "[user_auth_service.verify_token] Stale token rejected (cached_ver=%s > token_ver=%s) for user=%s",
+                    cached_ver, token_ver, uid
+                )
+                return None
         except Exception:
             pass
 
@@ -317,13 +330,22 @@ class UserAuthService:
         if not user:
             user = self.repo.get_user_preauth(uid)
 
-        if user and not user.get("is_active", True):
+        if not user or not user.get("is_active", True):
             return None
 
-        if user and not user.get("tenant_id"):
+        # Verify DB token_version
+        active_ver = int(user.get("token_version", 1))
+        if active_ver > token_ver:
+            logger.warning(
+                "[user_auth_service.verify_token] Stale token rejected by DB (active_ver=%s > token_ver=%s) for user=%s",
+                active_ver, token_ver, uid
+            )
+            return None
+
+        if not user.get("tenant_id"):
             user["tenant_id"] = tid
 
-        if user and not user.get("organization_name"):
+        if not user.get("organization_name"):
             t = self.repo.get_tenant_by_id(tid)
             if t:
                 user["organization_name"] = t.get("name", "Organization")
@@ -331,12 +353,24 @@ class UserAuthService:
         return user
 
     def invalidate_auth_cache(self, tenant_id: str, user_id: str):
-        """Immediately evict user authorization cache upon role change or deletion."""
+        """Immediately evict user authorization cache upon role change or deletion, bumping token version."""
+        tid = tenant_id.strip()
+        uid = user_id.strip()
         try:
             cache = get_kv_cache()
-            cache.delete(f"user_auth:{tenant_id}:{user_id}")
-        except Exception:
-            pass
+            cache.set(f"user_auth:{tid}:{uid}", "none:revoked", ttl=300)
+            if hasattr(cache, "delete_sync"):
+                cache.delete_sync(f"user_auth:{tid}:{uid}")
+            else:
+                cache._mem_store.pop(f"user_auth:{tid}:{uid}", None)
+            cache.incr(f"user_token_version:{tid}:{uid}")
+        except Exception as e:
+            logger.debug("[invalidate_auth_cache] Cache bump error: %s", e)
+
+        try:
+            self.repo.increment_token_version(user_id=uid, tenant_id=tid)
+        except Exception as e:
+            logger.warning("[invalidate_auth_cache] Failed to increment DB token version: %s", e)
 
     def create_invite(
         self,

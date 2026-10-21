@@ -213,3 +213,21 @@ DEFAULT_CORS_ORIGINS = [
 ]
 _raw_cors = os.getenv("CORS_ALLOWED_ORIGINS", "")
 CORS_ORIGINS = [o.strip() for o in _raw_cors.split(",") if o.strip()] if _raw_cors else DEFAULT_CORS_ORIGINS
+
+# ──────────────────────────────────────────────────────────────
+# Environment & Deployment Mode
+# ──────────────────────────────────────────────────────────────
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
+
+# ──────────────────────────────────────────────────────────────
+# Phase 4: Enterprise Vector Scaling (HNSW) & Search Caching
+# ──────────────────────────────────────────────────────────────
+USE_HNSW_INDEX = os.getenv("USE_HNSW_INDEX", "1").lower() in ("true", "1")
+HNSW_M = int(os.getenv("HNSW_M", "32"))
+HNSW_EF_CONSTRUCTION = int(os.getenv("HNSW_EF_CONSTRUCTION", "128"))
+HNSW_EF_SEARCH = int(os.getenv("HNSW_EF_SEARCH", "64"))
+
+ENABLE_SEARCH_CACHE = os.getenv("ENABLE_SEARCH_CACHE", "1").lower() in ("true", "1")
+SEARCH_CACHE_L1_SIZE = int(os.getenv("SEARCH_CACHE_L1_SIZE", "10000"))
+SEARCH_CACHE_L1_TTL = int(os.getenv("SEARCH_CACHE_L1_TTL", "300"))      # 5 minutes in memory
+SEARCH_CACHE_L2_TTL = int(os.getenv("SEARCH_CACHE_L2_TTL", "3600"))     # 1 hour in Redis
