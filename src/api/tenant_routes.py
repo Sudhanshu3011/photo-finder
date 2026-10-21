@@ -91,11 +91,20 @@ def update_member_role(
     if not target_user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Member not found in organization")
 
-    # Prevent demoting the tenant owner unless caller is owner
+    # Prevent demoting the sole organization owner (Pillar 11 protection)
+    if target_user.get("role") == "owner" and req.role.value != "owner":
+        owner_count = repo.count_tenant_owners(tenant_id)
+        if owner_count <= 1:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Cannot demote the sole organization owner. Transfer ownership or promote another member to owner first."
+            )
+
+    # Prevent modifying another owner's role unless caller is the owner
     if target_user.get("role") == "owner" and current_admin.get("user_id") != user_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Cannot modify the role of the Organization Owner"
+            detail="Cannot modify the role of another Organization Owner"
         )
 
     updated = repo.update_tenant_member_role(tenant_id=tenant_id, user_id=user_id, role=req.role.value)

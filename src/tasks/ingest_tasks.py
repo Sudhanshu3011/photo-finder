@@ -20,6 +20,7 @@ from src.modules.deduplication.image_hasher import (
     find_duplicate_image,
 )
 from src.modules.infra.kv_cache import get_kv_cache
+from src.modules.infra.search_cache import get_search_cache
 from src.modules.storage.local_storage import save_image_bytes
 from src.modules.storage.s3_storage import (
     build_s3_url,
@@ -263,6 +264,10 @@ def task_batch_completion_callback(
 
     cache.set(f"job:{tenant_id}:{job_id}", cached)
     cache.set(f"job:{job_id}", cached)
+
+    # Invalidate tenant search cache in O(1) so stale search results are never served
+    if successful > 0:
+        get_search_cache().invalidate_tenant(tenant_id)
 
     log("INFO", "tasks.batch.completed", job_id=job_id, status=status, successful=successful, duplicates=duplicate, failed=failed, tenant_id=tenant_id)
 

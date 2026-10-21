@@ -28,11 +28,12 @@ def create_access_token(
     user_id: Optional[str] = None,
     role: str = "user",
     tenant_id: str = "default",
+    token_version: int = 1,
     expires_in_seconds: int = DEFAULT_TOKEN_EXPIRY_SECONDS,
     extra_claims: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
-    Issues an HS256 signed JWT token.
+    Issues an HS256 signed JWT token with multi-tenant context and token_version for instant invalidation.
     Supports either passing a dictionary via `data` or keyword parameters `user_id`, `role`, `tenant_id`.
     """
     now = int(time.time())
@@ -40,15 +41,19 @@ def create_access_token(
         "iat": now,
         "exp": now + expires_in_seconds,
         "tenant_id": tenant_id or "default",
+        "token_version": token_version,
     }
     if data:
         payload.update(data)
         if "tenant_id" not in payload:
             payload["tenant_id"] = tenant_id or "default"
+        if "token_version" not in payload:
+            payload["token_version"] = token_version
     elif user_id:
         payload["sub"] = user_id
         payload["role"] = role
         payload["tenant_id"] = tenant_id or "default"
+        payload["token_version"] = token_version
 
     if extra_claims:
         payload.update(extra_claims)

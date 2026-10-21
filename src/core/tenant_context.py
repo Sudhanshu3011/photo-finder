@@ -2,9 +2,13 @@
 src/core/tenant_context.py — Asynchronous Tenant Context Management.
 Uses contextvars to propagate tenant_id across async coroutines and background tasks.
 """
+import asyncio
+import concurrent.futures
 import contextvars
 from contextlib import contextmanager
-from typing import Generator, Optional
+from typing import Any, Callable, Generator, Optional, TypeVar
+
+T = TypeVar("T")
 
 DEFAULT_TENANT_ID: str = "default"
 
@@ -45,3 +49,35 @@ def tenant_context(tenant_id: Optional[str]) -> Generator[str, None, None]:
         yield get_current_tenant_id()
     finally:
         reset_current_tenant_id(token)
+
+
+def run_in_tenant_thread(func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    """
+    Execute a callable in a worker thread while strictly preserving tenant contextvars.
+    Prevents silent context leakage or fallback to 'default' tenant in ThreadPoolExecutors.
+    """
+    ctx = contextvars.copy_context()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(ctx.run, func, *args, **kwargs)
+        return future.result()
+
+
+class TenantPreservingThreadPoolExecutor(concurrent.futures.ThreadPoolExecutor):
+    """
+    ThreadPoolExecutor that automatically snapshots caller's contextvars
+    and restores them inside every submitted task.
+    """
+
+    def submit(self, fn: Callable[..., T], /, *args: Any, **kwargs: Any) -> concurrent.futures.Future[T]:
+        ctx = contextvars.copy_context()
+        return super().submit(ctx.run, fn, *args, **kwargs)
+
+
+async def run_async_in_tenant_thread(func: Callable[..., T], *args: Any, **kwargs: Any) -> T:
+    """
+    Asynchronously run a blocking CPU/IO function in a worker thread with preserved tenant context.
+    """
+    loop = asyncio.get_running_loop()
+    ctx = contextvars.copy_context()
+    return await loop.run_in_executor(None, ctx.run, func, *args, **kwargs)
+

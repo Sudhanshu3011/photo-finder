@@ -69,9 +69,8 @@ def _resolve_search_filter(
 @router.post("/image", response_model=SearchResponse, status_code=status.HTTP_200_OK)
 async def search_by_image(
     request: Request,
-    file: Optional[UploadFile] = File(None, description="Query image file upload"),
-    image_url: Optional[str] = Form(None, description="Direct S3 or image URL to query"),
-    folder_name: Optional[str] = Form(None, description="Restrict search to this folder/album"),
+    file: UploadFile = File(..., description="Query image file upload (mandatory)"),
+    folder_name: str = Form(..., description="Target folder/album to search within (mandatory)"),
     top_k: int = Query(20, ge=1, le=30, description="Maximum number of matches to return"),
     threshold: float = Query(0.60, ge=0.0, le=1.0, description="Cosine similarity threshold"),
     service: ImageSearchService = Depends(get_image_search_service),
@@ -80,26 +79,27 @@ async def search_by_image(
     repo: PostgresRepository = Depends(get_repository),
 ):
     """
-    Search gallery using an input query image file or direct image URL.
-    Optionally scopes search to a specific folder/album.
-    Pre-filters candidate search vectors strictly to permitted folders.
+    Search gallery using an uploaded query image file scoped strictly to the specified folder/album.
+    Folder-level capability is verified before querying ('view' access required).
+    Pre-filters candidate search vectors strictly to the permitted folder.
     """
-    contents = None
-    if file is not None:
-        contents = await file.read()
-    elif image_url:
-        try:
-            contents = await fetch_image_bytes_from_url(image_url)
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Could not download query image from URL: {str(e)}"
-            )
+    clean_folder = (folder_name or "").strip()
+    if not clean_folder:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="folder_name is mandatory and must not be empty"
+        )
 
+    # 1. Enforce folder-level security: Caller MUST have 'view' capability on this folder
+    folder = check_folder_capability(clean_folder, "view", current_user, tenant_id, repo)
+    filter_dict = {"folder": folder["folder_name"]}
+
+    # 2. Read and validate query image file
+    contents = await file.read()
     if not contents or len(contents) == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Empty query image: please provide an image file or valid image_url"
+            detail="Empty query image file provided"
         )
 
     if len(contents) > MAX_UPLOAD_SIZE_BYTES:
@@ -120,14 +120,8 @@ async def search_by_image(
     if cv_img is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Corrupted or invalid image format")
 
-    target_folder = (folder_name or request.query_params.get("folder_name") or request.query_params.get("folder") or "").strip()
-    filter_dict = _resolve_search_filter(target_folder, current_user, tenant_id, repo)
-
-    if filter_dict and filter_dict.get("allowed_folders") == ["__no_accessible_folders__"]:
-        return SearchResponse(query_type="none", total_matches=0, results=[])
-
-    logger.info("[Search Route] Visual search (tenant='%s', scope='%s', top_k=%d, threshold=%.2f)",
-                tenant_id, target_folder or "Permitted Folders", top_k, threshold)
+    logger.info("[Search Route] Visual search (tenant='%s', folder='%s', top_k=%d, threshold=%.2f)",
+                tenant_id, folder["folder_name"], top_k, threshold)
 
     res = service.search_by_image(
         cv_img=cv_img,
@@ -144,7 +138,7 @@ async def search_by_image(
         c_url = m.get("cloud_url") or meta.get("url") or ""
         if not c_url and img_id:
             pid = img_id if img_id.startswith("img_") else f"img_{img_id}"
-            fld = target_folder or meta.get("folder") or "general"
+            fld = clean_folder or meta.get("folder") or "general"
             c_url = build_s3_url(key=f"{fld}/{pid}.jpg")
         meta["url"] = c_url
 

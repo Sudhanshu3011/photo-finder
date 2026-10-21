@@ -12,8 +12,9 @@ async def test_search_image_success(client: AsyncClient):
     """Test POST /api/search/image with valid query image returns matches adhering to SearchResponse schema."""
     query_bytes = create_mock_jpeg(120, 120)
     files = {"file": ("query.jpg", query_bytes, "image/jpeg")}
+    data = {"folder_name": "general"}
 
-    response = await client.post("/api/search/image", files=files)
+    response = await client.post("/api/search/image", files=files, data=data)
     assert response.status_code == 200
 
     body = response.json()
@@ -44,7 +45,19 @@ async def test_search_empty_file_fails(client: AsyncClient):
     """Test that uploading an empty 0-byte file returns 400 Bad Request."""
     empty_file = ("empty.jpg", b"", "image/jpeg")
     files = {"file": empty_file}
+    data = {"folder_name": "general"}
 
-    response = await client.post("/api/search/image", files=files)
+    response = await client.post("/api/search/image", files=files, data=data)
     assert response.status_code == 400
     assert "empty" in response.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
+async def test_search_missing_folder_fails(client: AsyncClient):
+    """Test that omitting folder_name returns 422 Unprocessable Entity."""
+    query_bytes = create_mock_jpeg(120, 120)
+    files = {"file": ("query.jpg", query_bytes, "image/jpeg")}
+
+    response = await client.post("/api/search/image", files=files)
+    assert response.status_code == 422
+

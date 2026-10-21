@@ -122,6 +122,50 @@ class KeyValueCache:
         exp = (time.time() + ttl) if ttl else 0
         self._mem_store[key] = (value, exp)
 
+    def incr(self, key: str, amount: int = 1) -> int:
+        """Increment a counter key synchronously across Redis and local memory store."""
+        new_val = None
+        sync_r = self.get_sync_redis()
+        if sync_r:
+            try:
+                new_val = int(sync_r.incrby(key, amount))
+            except Exception as e:
+                logger.debug("Sync Redis incrby error on key %s: %s", key, e)
+
+        curr_val = 0
+        if key in self._mem_store:
+            val, exp = self._mem_store[key]
+            if exp == 0 or exp > time.time():
+                try:
+                    curr_val = int(val)
+                except (ValueError, TypeError):
+                    curr_val = 0
+        curr_val += amount
+        self._mem_store[key] = (curr_val, 0)
+        return new_val if new_val is not None else curr_val
+
+    async def aincr(self, key: str, amount: int = 1) -> int:
+        """Increment a counter key asynchronously across Redis and local memory store."""
+        redis = await self._get_redis()
+        new_val = None
+        if redis:
+            try:
+                new_val = int(await redis.incrby(key, amount))
+            except Exception as e:
+                logger.debug("Redis aincr error on key %s: %s", key, e)
+
+        curr_val = 0
+        if key in self._mem_store:
+            val, exp = self._mem_store[key]
+            if exp == 0 or exp > time.time():
+                try:
+                    curr_val = int(val)
+                except (ValueError, TypeError):
+                    curr_val = 0
+        curr_val += amount
+        self._mem_store[key] = (curr_val, 0)
+        return new_val if new_val is not None else curr_val
+
     async def aget(self, key: str) -> Optional[str]:
         """Asynchronous get: checks Redis first, then in-memory cache."""
         redis = await self._get_redis()
@@ -172,6 +216,16 @@ class KeyValueCache:
     async def set_json(self, key: str, value: Any, ttl: Optional[int] = None) -> None:
         """JSON-serialize and store an object."""
         await self.aset(key, json.dumps(value), ttl=ttl)
+
+    def delete_sync(self, key: str) -> None:
+        """Remove a key synchronously across sync Redis and local memory store."""
+        sync_r = self.get_sync_redis()
+        if sync_r:
+            try:
+                sync_r.delete(key)
+            except Exception as e:
+                logger.debug("Sync Redis delete error on key %s: %s", key, e)
+        self._mem_store.pop(key, None)
 
     async def delete(self, key: str) -> None:
         """Remove a key across Redis and local memory store."""
