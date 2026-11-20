@@ -225,6 +225,24 @@ def get_current_user_profile(
     profile = service.get_profile(current_user["user_id"], current_user.get("tenant_id"))
     user = profile or current_user
 
+    workspaces = service.get_user_workspaces(user.get("email", ""))
+    options = [
+        TenantOptionItem(
+            tenant_id=w["tenant_id"],
+            organization_name=w["organization_name"],
+            role=w["role"],
+        )
+        for w in workspaces
+    ]
+    if not options and user.get("tenant_id"):
+        options = [
+            TenantOptionItem(
+                tenant_id=user["tenant_id"],
+                organization_name=user.get("organization_name", user["tenant_id"]),
+                role=user.get("role", "viewer"),
+            )
+        ]
+
     return UserProfileResponse(
         user_id=user["user_id"],
         username=user["username"],
@@ -236,5 +254,23 @@ def get_current_user_profile(
         storage_bucket=user.get("storage_bucket"),
         created_at=str(user.get("created_at", "")),
         last_seen=str(user.get("last_seen", "")),
+        available_tenants=options,
     )
+
+
+@router.get("/workspaces", response_model=List[TenantOptionItem], status_code=status.HTTP_200_OK)
+def list_user_workspaces(
+    current_user: dict = Depends(require_current_user),
+    service: UserAuthService = Depends(get_auth_service),
+):
+    """Retrieve all genuine organization workspaces the authenticated user belongs to."""
+    workspaces = service.get_user_workspaces(current_user.get("email", ""))
+    return [
+        TenantOptionItem(
+            tenant_id=w["tenant_id"],
+            organization_name=w["organization_name"],
+            role=w["role"],
+        )
+        for w in workspaces
+    ]
 

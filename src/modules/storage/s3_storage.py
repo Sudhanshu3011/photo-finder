@@ -8,9 +8,11 @@ import logging
 import mimetypes
 import os
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from src.core.logging import log, warn
 from src.core.tenant_context import get_current_tenant_id
+from src.modules.infra.kv_cache import get_kv_cache
 from src.modules.storage.local_storage import get_image_path
 
 
@@ -80,6 +82,108 @@ def build_s3_url(key: str, bucket: Optional[str] = None, region: Optional[str] =
     return f"https://{b_name}.s3.{reg}.amazonaws.com/{key}"
 
 
+def extract_s3_key(key_or_url: str, bucket: Optional[str] = None) -> str:
+    """
+    Extract clean S3 object key from a full S3 HTTPS URL, presigned URL, or raw key string.
+    Removes protocol, bucket domain prefixes, leading slashes, and trailing query parameters.
+    """
+    if not key_or_url or not isinstance(key_or_url, str):
+        return ""
+
+    val = key_or_url.strip()
+    if not val.startswith("http://") and not val.startswith("https://"):
+        return val.lstrip("/")
+
+    parsed = urlparse(val)
+    path = parsed.path.lstrip("/")
+    b_name = bucket or get_s3_bucket()
+
+    # Path-style S3 URL: https://s3.region.amazonaws.com/bucket-name/key...
+    if b_name and path.startswith(f"{b_name}/"):
+        path = path[len(b_name) + 1:].lstrip("/")
+
+    return path
+
+
+def generate_presigned_url(
+    key: str,
+    expires_in: int = 3600,
+    bucket: Optional[str] = None,
+    creds: Optional[dict] = None,
+) -> Optional[str]:
+    """
+    Generates a temporary AWS S3 pre-signed GET URL for secure direct browser retrieval.
+    Returns None if S3 client is unavailable or credentials fail.
+    """
+    clean_key = extract_s3_key(key, bucket=bucket)
+    if not clean_key:
+        return None
+
+    b_name = bucket or get_s3_bucket(creds)
+    client = get_s3_client(creds)
+    if not client:
+        return None
+
+    try:
+        url = client.generate_presigned_url(
+            ClientMethod="get_object",
+            Params={"Bucket": b_name, "Key": clean_key},
+            ExpiresIn=expires_in,
+        )
+        return url
+    except Exception as e:
+        logger.warning("[storage.s3] Failed to generate presigned URL for key '%s': %s", clean_key, e)
+        return None
+
+
+def get_accessible_image_url(
+    key_or_url: str,
+    expires_in: int = 3600,
+    bucket: Optional[str] = None,
+    creds: Optional[dict] = None,
+) -> str:
+    """
+    Resolves an accessible image URL for browser rendering.
+    If the asset is in S3, generates or retrieves a cached pre-signed URL to prevent 403 Forbidden.
+    Falls back gracefully to static S3 URL or original string if signing cannot be completed.
+    """
+    if not key_or_url or not isinstance(key_or_url, str):
+        return ""
+
+    raw = key_or_url.strip()
+    clean_key = extract_s3_key(raw, bucket=bucket)
+    if not clean_key:
+        return raw
+
+    # 1. Check Redis / KV cache to avoid redundant signing overhead
+    b_name = bucket or get_s3_bucket(creds)
+    cache_key = f"s3:presigned:{b_name}:{clean_key}"
+    try:
+        kv = get_kv_cache()
+        cached = kv.get(cache_key)
+        if cached and isinstance(cached, str) and cached.startswith("http"):
+            return cached
+    except Exception as cache_err:
+        logger.debug("[storage.s3] Presigned cache lookup skipped: %s", cache_err)
+
+    # 2. Generate active presigned URL
+    signed = generate_presigned_url(clean_key, expires_in=expires_in, bucket=b_name, creds=creds)
+    if signed:
+        try:
+            # Cache for slightly less than expiration window (e.g., 50 minutes for a 60-minute token)
+            cache_ttl = max(60, expires_in - 300)
+            kv = get_kv_cache()
+            kv.set(cache_key, signed, ttl=cache_ttl)
+        except Exception as cache_write_err:
+            logger.debug("[storage.s3] Presigned cache write skipped: %s", cache_write_err)
+        return signed
+
+    # 3. Fallback: return permanent S3 URL if client unavailable or signing failed
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return raw
+    return build_s3_url(clean_key, bucket=b_name)
+
+
 def ping_s3(bucket: Optional[str] = None, creds: Optional[dict] = None) -> bool:
     """Check connectivity and bucket access for AWS S3."""
     b_name = bucket or get_s3_bucket(creds)
@@ -122,9 +226,11 @@ def upload_to_s3(
             raise e
 
     s3_url = build_s3_url(key, b_name)
+    accessible_url = get_accessible_image_url(key, bucket=b_name, creds=creds)
     return {
-        "secure_url": s3_url,
-        "url": s3_url,
+        "secure_url": accessible_url or s3_url,
+        "url": accessible_url or s3_url,
+        "raw_s3_url": s3_url,
         "public_id": key,
         "key": key,
         "bucket": b_name,
@@ -288,11 +394,12 @@ def list_s3_folder_images(
         items = []
         for obj in res.get("Contents", []):
             k = obj["Key"]
+            acc_url = get_accessible_image_url(k, bucket=b_name, creds=creds)
             items.append({
                 "key": k,
                 "public_id": k,
-                "secure_url": build_s3_url(k, b_name),
-                "url": build_s3_url(k, b_name),
+                "secure_url": acc_url,
+                "url": acc_url,
                 "size": obj.get("Size", 0),
                 "last_modified": obj.get("LastModified").isoformat() if hasattr(obj.get("LastModified"), "isoformat") else str(obj.get("LastModified")),
             })

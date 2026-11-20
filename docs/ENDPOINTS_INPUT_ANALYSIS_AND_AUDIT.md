@@ -579,9 +579,9 @@ For every endpoint, this document details:
 
 | Priority | Endpoint(s) | Parameter | Audit Finding | Recommended Action |
 | :---: | :--- | :--- | :--- | :--- |
-| 🔴 **HIGH** | `POST /api/upload/photo`<br/>`POST /api/upload/batch` | `s3_bucket: Optional[str]` | **Security Risk**: Untrusted client can override target storage bucket. | **Remove `s3_bucket` from Form body**. Resolve bucket strictly on the server from the caller's tenant profile. |
-| 🔴 **HIGH** | `POST /api/auth/storage-config` | Endpoint permissions | **Permission Flaw**: Low-privilege users (`viewer`) can alter S3 configuration. | Restrict to `require_tenant_admin` (`owner`/`admin`) and relocate to `/api/tenant/storage-config`. |
-| 🟡 **MEDIUM** | `GET /api/tenant/members`<br/>`GET /api/folders` | None (Unbounded lists) | **Scalability Risk**: Returns unbounded records; slow for enterprise studios. | Add standard pagination parameters: `limit: int = 50`, `offset: int = 0`. |
-| 🟡 **MEDIUM** | `POST /api/log` | Unauthenticated endpoint | **DOS / Log Pollution Risk**: No body size limit or rate limiting. | Apply rate limiting (60 req/min/IP) and enforce 16 KB payload limit. |
-| 🟢 **LOW** | `POST /api/clusters/generate` | `folder_name: str` | Missing ACL check before clustering. | Add `check_folder_capability(folder_name, "view")` guard. |
+| [High] **HIGH** | `POST /api/upload/photo`<br/>`POST /api/upload/batch` | `s3_bucket: Optional[str]` | **Security Risk**: Untrusted client can override target storage bucket. | **Remove `s3_bucket` from Form body**. Resolve bucket strictly on the server from the caller's tenant profile. |
+| [High] **HIGH** | `POST /api/auth/storage-config` | Endpoint permissions | **Permission Flaw**: Low-privilege users (`viewer`) can alter S3 configuration. | Restrict to `require_tenant_admin` (`owner`/`admin`) and relocate to `/api/tenant/storage-config`. |
+| [Medium] **MEDIUM** | `GET /api/tenant/members`<br/>`GET /api/folders` | None (Unbounded lists) | **Scalability Risk**: Returns unbounded records; slow for enterprise studios. | Add standard pagination parameters: `limit: int = 50`, `offset: int = 0`. |
+| [Medium] **MEDIUM** | `POST /api/log` | Unauthenticated endpoint | **DOS / Log Pollution Risk**: No body size limit or rate limiting. | Apply rate limiting (60 req/min/IP) and enforce 16 KB payload limit. |
+| [Low] **LOW** | `POST /api/clusters/generate` | `folder_name: str` | Missing ACL check before clustering. | Add `check_folder_capability(folder_name, "view")` guard. |
 

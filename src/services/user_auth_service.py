@@ -421,6 +421,20 @@ class UserAuthService:
                 user["organization_name"] = t.get("name", "Organization")
         return user
 
+    def get_user_workspaces(self, email: str) -> List[Dict[str, Any]]:
+        """Retrieve all active organizations the user has access to."""
+        if not email or not email.strip():
+            return []
+        memberships = self.repo.get_users_by_email_preauth(email.strip().lower())
+        return [
+            {
+                "tenant_id": m["tenant_id"],
+                "organization_name": m.get("organization_name") or m["tenant_id"],
+                "role": m.get("role", "viewer"),
+            }
+            for m in memberships
+        ]
+
     def update_storage_config(self, user_id: str, bucket_or_config: str, tenant_id: Optional[str] = None) -> bool:
         """Update storage bucket on user's profile."""
         return self.repo.update_user_storage_bucket(user_id, bucket_or_config, tenant_id=tenant_id)

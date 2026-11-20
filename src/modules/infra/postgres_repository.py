@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 from src.core.tenant_context import get_current_tenant_id
+from src.modules.storage.s3_storage import get_accessible_image_url
 
 logger = logging.getLogger("src.modules.infra.postgres_repository")
 
@@ -1270,17 +1271,28 @@ class PostgresRepository:
                         idx += 1
                     query += " ORDER BY face_count DESC"
                     rows = await conn.fetch(query, *params)
-                    return [
-                        {
+                    res = []
+                    for r in rows:
+                        rep_url = r["representative_face_url"] or ""
+                        if rep_url and not rep_url.startswith("http") and not rep_url.startswith("/"):
+                            sub_row = await conn.fetchrow(
+                                "SELECT url FROM vector_metadata WHERE tenant_id = $1 AND (vector_id LIKE '%' || $2 || '%' OR url LIKE '%' || $2 || '%') LIMIT 1",
+                                tid, rep_url
+                            )
+                            if sub_row and sub_row["url"]:
+                                rep_url = sub_row["url"]
+
+                        signed_url = get_accessible_image_url(rep_url) if rep_url else ""
+                        res.append({
                             "cluster_id": r["cluster_id"],
                             "person_name": r["person_name"] or "Unnamed Person",
                             "face_count": r["face_count"],
                             "folder": r["folder"],
-                            "sample_crop_urls": [r["representative_face_url"]] if r["representative_face_url"] else [],
+                            "medoid_image_url": signed_url or None,
+                            "sample_crop_urls": [signed_url] if signed_url else [],
                             "created_at": str(r["updated_at"]),
-                        }
-                        for r in rows
-                    ]
+                        })
+                    return res
             return _run_sync(_get())
 
         with _mem_lock:
@@ -1915,7 +1927,13 @@ class PostgresRepository:
             async def _get():
                 async with get_tenant_connection(tid) as conn:
                     row = await conn.fetchrow(
-                        "SELECT * FROM folders WHERE tenant_id = $1 AND folder_id = $2",
+                        """
+                        SELECT f.folder_id, f.tenant_id, f.folder_name, f.description, f.visibility, 
+                               GREATEST(f.photo_count, COALESCE((SELECT COUNT(DISTINCT vm.url) FROM vector_metadata vm WHERE vm.tenant_id = f.tenant_id AND (vm.folder = f.folder_name OR vm.folder = f.folder_id)), 0)) AS photo_count, 
+                               f.created_by, f.created_at, f.updated_at 
+                        FROM folders f 
+                        WHERE f.tenant_id = $1 AND f.folder_id = $2
+                        """,
                         tid, fid
                     )
                     return dict(row) if row else None
@@ -1937,7 +1955,13 @@ class PostgresRepository:
             async def _get():
                 async with get_tenant_connection(tid) as conn:
                     row = await conn.fetchrow(
-                        "SELECT * FROM folders WHERE tenant_id = $1 AND folder_name = $2",
+                        """
+                        SELECT f.folder_id, f.tenant_id, f.folder_name, f.description, f.visibility, 
+                               GREATEST(f.photo_count, COALESCE((SELECT COUNT(DISTINCT vm.url) FROM vector_metadata vm WHERE vm.tenant_id = f.tenant_id AND (vm.folder = f.folder_name OR vm.folder = f.folder_id)), 0)) AS photo_count, 
+                               f.created_by, f.created_at, f.updated_at 
+                        FROM folders f 
+                        WHERE f.tenant_id = $1 AND f.folder_name = $2
+                        """,
                         tid, fname
                     )
                     return dict(row) if row else None
@@ -2195,7 +2219,7 @@ class PostgresRepository:
                             f.folder_name,
                             f.description,
                             f.visibility,
-                            f.photo_count,
+                            GREATEST(f.photo_count, COALESCE((SELECT COUNT(DISTINCT vm.url) FROM vector_metadata vm WHERE vm.tenant_id = f.tenant_id AND (vm.folder = f.folder_name OR vm.folder = f.folder_id)), 0)) AS photo_count,
                             f.created_by,
                             f.created_at,
                             CASE

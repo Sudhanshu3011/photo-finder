@@ -17,6 +17,6 @@ class SearchResponse(BaseModel):
     results: List[MatchItem]
 
 class MultiAngleSearchRequest(BaseModel):
-    threshold: Optional[float] = 0.60
+    threshold: Optional[float] = 0.40
     top_k: Optional[int] = 20
 

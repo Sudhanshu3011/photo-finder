@@ -1,6 +1,6 @@
 ---
 title: Visual Search Api
-emoji: ⚡
+emoji: 
 colorFrom: blue
 colorTo: green
 sdk: docker
@@ -19,7 +19,7 @@ license: mit
 
 ---
 
-## 📖 Deep-Dive Architecture & Context Documentation
+##  Deep-Dive Architecture & Context Documentation
 
 Comprehensive architectural blueprints and technical references are maintained in the [`context/`](context/) folder:
 
@@ -37,7 +37,7 @@ Comprehensive architectural blueprints and technical references are maintained i
 
 ---
 
-## ⚡ Key Capabilities
+##  Key Capabilities
 
 - **Sub-2ms Visual Search**: Executes cosine similarity search locally on CPU via FAISS `IndexFlatIP` without external vector cloud latency or API costs.
 - **Dual-Model Face Scoring**: Combines **ArcFace** (angular discriminative margin) and **AdaFace** (adaptive image-quality margin) into a composite similarity score ($0.60 \cdot \text{ArcFace} + 0.40 \cdot \text{AdaFace}$) to maximize recall under challenging lighting and blur.
@@ -49,7 +49,7 @@ Comprehensive architectural blueprints and technical references are maintained i
 
 ---
 
-## 🏗️ System Architecture Overview
+##  System Architecture Overview
 
 ```mermaid
 flowchart TD
@@ -95,7 +95,7 @@ flowchart TD
 
 ---
 
-## 🚀 Quick Start Guide
+##  Quick Start Guide
 
 ### 1. Run with Docker (Recommended)
 
@@ -134,7 +134,7 @@ uvicorn main:app --host 0.0.0.0 --port 7860 --reload
 
 ---
 
-## 🔑 Environment Configuration (`.env`)
+##  Environment Configuration (`.env`)
 
 ```ini
 # Server Concurrency & Threads
@@ -160,7 +160,7 @@ JWT_SECRET_KEY=your-secure-jwt-secret-key-32-chars
 
 ---
 
-## 📡 API Reference & Examples
+##  API Reference & Examples
 
 ### 1. Authenticate & Obtain JWT Token
 ```bash
@@ -199,7 +199,7 @@ curl -X GET "http://localhost:7860/api/clusters?folder_name=general" \
 
 ---
 
-## 🧪 Running Automated Tests
+##  Running Automated Tests
 
 The test suite runs in full isolation with separate temporary databases in `/tmp`:
 
@@ -209,6 +209,6 @@ docker exec -e PYTHONPATH=/app visual_search_api pytest tests/unit/
 
 ---
 
-## 📄 License
+##  License
 
 This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.

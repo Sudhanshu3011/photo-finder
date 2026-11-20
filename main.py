@@ -9,6 +9,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from src.core.config import MAX_CONCURRENT_INFERENCES, CORS_ORIGINS
 from src.core.logging import log, init_logging_session, close_logging_session
@@ -19,6 +20,7 @@ from src.api import (
     upload_router,
     processing_router,
     search_router,
+    media_router,
     system_router,
     ui_router,
 )
@@ -80,3 +82,8 @@ app.include_router(folder_router)
 app.include_router(upload_router)
 app.include_router(processing_router)
 app.include_router(search_router)
+app.include_router(media_router)
+
+# Mount Elementum Frontend Web App
+if os.path.exists("frontend"):
+    app.mount("/app", StaticFiles(directory="frontend", html=True), name="frontend_app")

@@ -64,6 +64,13 @@ def create_folder(
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     except Exception as e:
+        err_msg = str(e).lower()
+        if "unique" in err_msg or "duplicate" in err_msg or "uq_tenant_folder_name" in err_msg:
+            logger.warning("[folder_routes.create] Concurrent duplicate folder caught: %s", clean_name)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"A collection named '{clean_name}' already exists in this organization."
+            )
         logger.error("[folder_routes.create] Failed to create folder: %s", e)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create folder")
 
@@ -88,6 +95,7 @@ def list_accessible_folders(
     limit: int = Query(50, ge=1, le=200, description="Maximum folders to return per page"),
     offset: int = Query(0, ge=0, description="Offset for pagination"),
     visibility: Optional[str] = Query(None, description="Filter by visibility: tenant_wide or restricted"),
+    can_upload: Optional[bool] = Query(None, description="Filter folders by upload capability"),
     accessible_folders: List[dict] = Depends(get_user_accessible_folders),
 ):
     """
@@ -99,6 +107,9 @@ def list_accessible_folders(
     if visibility and visibility.strip():
         vis = visibility.strip().lower()
         filtered = [f for f in filtered if f.get("visibility", "").lower() == vis]
+
+    if can_upload is not None:
+        filtered = [f for f in filtered if bool(f.get("can_upload")) == can_upload]
 
     paginated = filtered[offset:offset + limit]
 
@@ -256,6 +267,69 @@ def bulk_set_folder_access(
         "status": "success",
         "message": f"Assigned {len(req.user_ids)} users to {len(req.folder_ids)} folders with access level '{req.access_level.value}'",
         "assigned_mappings_count": count,
+    }
+
+
+@router.post("/{folder_id}/access/bulk", status_code=status.HTTP_200_OK, include_in_schema=False)
+def bulk_set_single_folder_access(
+    folder_id: str,
+    req: dict,
+    current_user: dict = Depends(require_current_user),
+    tenant_id: str = Depends(get_current_tenant_id),
+    repo: PostgresRepository = Depends(get_repository),
+):
+    """
+    Update multiple members' access permissions on a specific folder.
+    Supports:
+    1. { grants: [{ user_id, can_upload, can_manage }] } or { grants: [{ user_id, access_level }] }
+    2. { user_ids: [...], access_level: "viewer" | "uploader" | "manager" }
+    """
+    folder = check_folder_capability(folder_id, "manage", current_user, tenant_id, repo)
+    fid = folder["folder_id"]
+    updated_count = 0
+
+    grants = req.get("grants")
+    if isinstance(grants, list):
+        for grant in grants:
+            uid = grant.get("user_id")
+            if not uid:
+                continue
+            lvl = grant.get("access_level")
+            if not lvl:
+                if grant.get("can_manage"):
+                    lvl = "manager"
+                elif grant.get("can_upload"):
+                    lvl = "uploader"
+                elif grant.get("can_view", True):
+                    lvl = "viewer"
+                else:
+                    lvl = "revoked"
+            repo.set_folder_access(
+                folder_id=fid,
+                user_id=uid,
+                tenant_id=tenant_id,
+                access_level=str(lvl).lower(),
+                granted_by=current_user["user_id"],
+            )
+            updated_count += 1
+    elif req.get("user_ids"):
+        uids = req.get("user_ids", [])
+        lvl = str(req.get("access_level", "viewer")).lower()
+        for uid in uids:
+            repo.set_folder_access(
+                folder_id=fid,
+                user_id=uid,
+                tenant_id=tenant_id,
+                access_level=lvl,
+                granted_by=current_user["user_id"],
+            )
+            updated_count += 1
+
+    return {
+        "status": "success",
+        "message": f"Updated access for {updated_count} members on '{folder['folder_name']}'",
+        "updated_count": updated_count,
+        "folder_id": fid,
     }
 
 

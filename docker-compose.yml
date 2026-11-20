@@ -39,6 +39,25 @@ services:
       - ./scripts:/app/scripts
     restart: unless-stopped
 
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: visual_search_frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - HOST=0.0.0.0
+      - BACKEND_URL=http://api:7860
+    depends_on:
+      - api
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/dev-server.js:/app/dev-server.js
+    restart: unless-stopped
+
   worker-ingest:
     image: visual-search-api-api:latest
     build:

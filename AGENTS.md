@@ -9,3 +9,7 @@
   2. Genuine circular dependency escape hatches when cross-queuing Celery tasks across worker queues.
   3. Optional platform/hardware-specific libraries (e.g., CUDA / TensorRT checks).
 
+## Strict Prohibition of Emojis
+- **Never Use Emojis**: Never use emojis anywhere in the codebase, including UI templates, button labels, dropdown items, toast notices, log messages, error messages, code comments, and documentation.
+- **Clean Editorial Typography**: Use clean, professional typography, subtle SVG icons where strictly necessary, or plain text labels (e.g., write "Search", "Upload", "Sign Out", "Switch Workspace", "Active", "Delete", "Manager", "Viewer" without emoji decoration).
+

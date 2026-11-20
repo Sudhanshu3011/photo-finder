@@ -7,6 +7,7 @@ from src.api.upload_routes import router as upload_router
 from src.api.processing_routes import router as processing_router
 from src.api.search_routes import router as search_router
 from src.api.system_routes import router as system_router
+from src.api.media_routes import router as media_router
 from src.api.ui import router as ui_router
 
 __all__ = [
@@ -17,5 +18,6 @@ __all__ = [
     "processing_router",
     "search_router",
     "system_router",
+    "media_router",
     "ui_router",
 ]

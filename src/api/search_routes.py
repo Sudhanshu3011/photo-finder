@@ -25,7 +25,7 @@ from src.modules.infra.postgres_repository import (
     sync_list_all_indexed_folders,
 )
 from src.common.utils import fetch_image_bytes_from_url
-from src.modules.storage.s3_storage import build_s3_url
+from src.modules.storage.s3_storage import build_s3_url, get_accessible_image_url, download_image_from_s3, extract_s3_key
 from src.modules.vision.image_quality import detect_image_format_from_bytes
 from src.core.config import MAX_UPLOAD_SIZE_BYTES, MAX_UPLOAD_SIZE_MB
 
@@ -48,6 +48,9 @@ def _resolve_search_filter(
         * Other roles search only their accessible folders via allowed_folders filter.
     """
     clean_target = (target_folder or "").strip()
+    if clean_target.lower() in ("all", "all permitted albums", "all permitted collections", "*"):
+        clean_target = ""
+
     role = str(current_user.get("role", "viewer")).lower()
     uid = current_user.get("user_id", "")
 
@@ -69,37 +72,49 @@ def _resolve_search_filter(
 @router.post("/image", response_model=SearchResponse, status_code=status.HTTP_200_OK)
 async def search_by_image(
     request: Request,
-    file: UploadFile = File(..., description="Query image file upload (mandatory)"),
-    folder_name: str = Form(..., description="Target folder/album to search within (mandatory)"),
+    file: Optional[UploadFile] = File(None, description="Query image file upload"),
+    image_url: Optional[str] = Form(None, description="Query image URL or storage key"),
+    folder_name: Optional[str] = Form(None, description="Target folder/album to search within (optional, defaults to all permitted)"),
     top_k: int = Query(20, ge=1, le=30, description="Maximum number of matches to return"),
-    threshold: float = Query(0.60, ge=0.0, le=1.0, description="Cosine similarity threshold"),
+    threshold: float = Query(0.40, ge=0.0, le=1.0, description="Cosine similarity threshold"),
     service: ImageSearchService = Depends(get_image_search_service),
     current_user: dict = Depends(require_current_user),
     tenant_id: str = Depends(get_current_tenant_id),
     repo: PostgresRepository = Depends(get_repository),
 ):
     """
-    Search gallery using an uploaded query image file scoped strictly to the specified folder/album.
+    Search gallery using an uploaded query image file scoped to a specific folder or all permitted folders.
     Folder-level capability is verified before querying ('view' access required).
-    Pre-filters candidate search vectors strictly to the permitted folder.
+    Pre-filters candidate search vectors strictly to permitted folders.
     """
-    clean_folder = (folder_name or "").strip()
-    if not clean_folder:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="folder_name is mandatory and must not be empty"
-        )
+    target_folder = (folder_name or request.query_params.get("folder_name") or request.query_params.get("folder") or "").strip()
+    filter_dict = _resolve_search_filter(target_folder, current_user, tenant_id, repo)
 
-    # 1. Enforce folder-level security: Caller MUST have 'view' capability on this folder
-    folder = check_folder_capability(clean_folder, "view", current_user, tenant_id, repo)
-    filter_dict = {"folder": folder["folder_name"]}
+    if filter_dict and filter_dict.get("allowed_folders") == ["__no_accessible_folders__"]:
+        return SearchResponse(query_type="face", total_matches=0, results=[])
 
-    # 2. Read and validate query image file
-    contents = await file.read()
+    # Read and validate query image file or URL
+    contents: Optional[bytes] = None
+    if file is not None:
+        contents = await file.read()
+    elif image_url and image_url.strip():
+        raw_url = image_url.strip()
+        s3_key = extract_s3_key(raw_url)
+        if s3_key:
+            try:
+                contents = download_image_from_s3(s3_key)
+            except Exception as dl_err:
+                logger.debug("[Search Route] S3 key direct fetch note: %s", dl_err)
+        if not contents:
+            try:
+                contents = await fetch_image_bytes_from_url(raw_url)
+            except Exception as net_err:
+                logger.warning("[Search Route] Failed to fetch image from URL %s: %s", raw_url, net_err)
+
     if not contents or len(contents) == 0:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Empty query image file provided"
+            detail="Valid query image file or image_url must be provided for visual search."
         )
 
     if len(contents) > MAX_UPLOAD_SIZE_BYTES:
@@ -121,7 +136,7 @@ async def search_by_image(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Corrupted or invalid image format")
 
     logger.info("[Search Route] Visual search (tenant='%s', folder='%s', top_k=%d, threshold=%.2f)",
-                tenant_id, folder["folder_name"], top_k, threshold)
+                tenant_id, target_folder or "all_permitted", top_k, threshold)
 
     res = service.search_by_image(
         cv_img=cv_img,
@@ -138,9 +153,16 @@ async def search_by_image(
         c_url = m.get("cloud_url") or meta.get("url") or ""
         if not c_url and img_id:
             pid = img_id if img_id.startswith("img_") else f"img_{img_id}"
-            fld = clean_folder or meta.get("folder") or "general"
-            c_url = build_s3_url(key=f"{fld}/{pid}.jpg")
-        meta["url"] = c_url
+            fld = target_folder or meta.get("folder") or "general"
+            c_url = f"{fld}/{pid}.jpg"
+
+        signed_c_url = get_accessible_image_url(c_url) if c_url else ""
+        t_url = m.get("thumbnail_url") or meta.get("thumbnail_url")
+        signed_t_url = get_accessible_image_url(t_url) if t_url else signed_c_url
+
+        meta["url"] = signed_c_url
+        if c_url and "raw_s3_url" not in meta:
+            meta["raw_s3_url"] = c_url
 
         matches.append(
             MatchItem(
@@ -149,8 +171,8 @@ async def search_by_image(
                 bbox=m.get("bbox"),
                 person_name=m.get("person_name"),
                 cluster_id=m.get("cluster_id") or meta.get("cluster_id"),
-                thumbnail_url=m.get("thumbnail_url"),
-                cloud_url=c_url,
+                thumbnail_url=signed_t_url,
+                cloud_url=signed_c_url,
                 metadata=meta
             )
         )
@@ -173,7 +195,7 @@ async def search_by_multi_angle(
     right_url: Optional[str] = Form(None, description="Optional right profile image URL"),
     folder_name: Optional[str] = Form(None, description="Restrict search to this folder/album"),
     top_k: int = Query(20, ge=1, le=30, description="Maximum number of matches to return"),
-    threshold: float = Query(0.60, ge=0.0, le=1.0, description="Cosine similarity threshold"),
+    threshold: float = Query(0.40, ge=0.0, le=1.0, description="Cosine similarity threshold"),
     service: ImageSearchService = Depends(get_image_search_service),
     current_user: dict = Depends(require_current_user),
     tenant_id: str = Depends(get_current_tenant_id),
@@ -246,8 +268,15 @@ async def search_by_multi_angle(
         if not c_url and img_id:
             pid = img_id if img_id.startswith("img_") else f"img_{img_id}"
             fld = target_folder or meta.get("folder") or "general"
-            c_url = build_s3_url(key=f"{fld}/{pid}.jpg")
-        meta["url"] = c_url
+            c_url = f"{fld}/{pid}.jpg"
+
+        signed_c_url = get_accessible_image_url(c_url) if c_url else ""
+        t_url = m.get("thumbnail_url") or meta.get("thumbnail_url")
+        signed_t_url = get_accessible_image_url(t_url) if t_url else signed_c_url
+
+        meta["url"] = signed_c_url
+        if c_url and "raw_s3_url" not in meta:
+            meta["raw_s3_url"] = c_url
 
         matches.append(
             MatchItem(
@@ -256,8 +285,8 @@ async def search_by_multi_angle(
                 bbox=m.get("bbox"),
                 person_name=m.get("person_name"),
                 cluster_id=m.get("cluster_id") or meta.get("cluster_id"),
-                thumbnail_url=m.get("thumbnail_url"),
-                cloud_url=c_url,
+                thumbnail_url=signed_t_url,
+                cloud_url=signed_c_url,
                 metadata=meta
             )
         )

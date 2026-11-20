@@ -59,3 +59,34 @@ Test-01/
 temp_uploads/
 model_repository/
 images/
+skills-lock.json
+Elementum.jpg
+
+# Frontend build, dependencies & cache
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+dist-ssr/
+build/
+.vite/
+frontend/.vite/
+frontend/.cache/
+*.tsbuildinfo
+
+# Frontend environment & local overrides
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+!frontend/.env.example
+
+# Frontend package manager logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/pnpm-debug.log*
+

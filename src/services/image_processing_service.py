@@ -309,11 +309,15 @@ class ImageProcessingService:
             cluster_id = f"cluster_{prefix}{lbl}"
             person_name = f"{folder_name} - Person {lbl + 1}" if folder_name else f"Person {lbl + 1}"
 
+            rep_url = rep.get("url") or rep.get("cloud_url") or ""
+            if not rep_url and rep.get("image_id"):
+                rep_url = rep["image_id"]
+
             self.repo.save_face_cluster(
                 cluster_id=cluster_id,
                 person_name=person_name,
                 face_count=len(indices),
-                sample_crop_urls=[rep.get("image_id", "")],
+                sample_crop_urls=[rep_url] if rep_url else [],
                 user_id=user_id or "system",
                 folder=folder_name,
                 tenant_id=tid,

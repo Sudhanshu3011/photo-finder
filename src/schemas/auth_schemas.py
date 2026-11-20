@@ -102,6 +102,7 @@ class UserProfileResponse(BaseModel):
     storage_bucket: Optional[str] = None
     created_at: str
     last_seen: Optional[str] = None
+    available_tenants: List[TenantOptionItem] = Field(default_factory=list)
 
 
 # ── 4. Member Management & Invitation Administration ────────────────

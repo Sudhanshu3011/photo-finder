@@ -205,13 +205,13 @@ FLUSHDB                      -- Clear cache (Caution!)
 Once services are running, open your browser to access the interactive web portals:
 
 1. **FastAPI Interactive API Documentation (Swagger UI)**:
-   👉 [http://localhost:7860/docs](http://localhost:7860/docs)
+   -> [http://localhost:7860/docs](http://localhost:7860/docs)
    - Execute requests directly in the browser
    - Authenticate with JWT Bearer tokens
    - Test photo uploads and vector queries
 
 2. **Celery Flower Monitoring Portal**:
-   👉 [http://localhost:5555](http://localhost:5555)
+   -> [http://localhost:5555](http://localhost:5555)
    - Real-time task throughput & latency charts
    - Worker concurrency & load averages
    - Ingest, inference, and clustering queue lengths

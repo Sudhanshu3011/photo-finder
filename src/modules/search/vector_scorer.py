@@ -18,7 +18,7 @@ from src.core.config import (
     FACE_BLUR_THRESHOLD,
 )
 from src.core.logging import log
-from src.modules.storage.s3_storage import build_s3_url
+from src.modules.storage.s3_storage import build_s3_url, get_accessible_image_url
 
 
 def score_face_matches(
@@ -51,8 +51,15 @@ def score_face_matches(
         if not cloud_url and img_id:
             pid = img_id if img_id.startswith("img_") else f"img_{img_id}"
             fld = meta.get("folder") or "general"
-            cloud_url = build_s3_url(key=f"{fld}/{pid}.jpg")
-            meta["url"] = cloud_url
+            cloud_url = f"{fld}/{pid}.jpg"
+
+        signed_cloud_url = get_accessible_image_url(cloud_url) if cloud_url else ""
+        raw_thumb = meta.get("thumbnail_url")
+        signed_thumb_url = get_accessible_image_url(raw_thumb) if raw_thumb else signed_cloud_url
+
+        meta["url"] = signed_cloud_url
+        if cloud_url and "raw_s3_url" not in meta:
+            meta["raw_s3_url"] = cloud_url
 
         scored.append({
             "image_id": img_id,
@@ -60,8 +67,8 @@ def score_face_matches(
             "bbox": meta.get("bbox"),
             "person_name": meta.get("person_name"),
             "cluster_id": meta.get("cluster_id"),
-            "thumbnail_url": meta.get("thumbnail_url"),
-            "cloud_url": cloud_url,
+            "thumbnail_url": signed_thumb_url,
+            "cloud_url": signed_cloud_url,
             "metadata": meta,
         })
 
@@ -86,14 +93,21 @@ def score_object_matches(
         if not cloud_url and img_id:
             pid = img_id if str(img_id).startswith("img_") else f"img_{img_id}"
             fld = meta.get("folder") or "general"
-            cloud_url = build_s3_url(key=f"{fld}/{pid}.jpg")
-            meta["url"] = cloud_url
+            cloud_url = f"{fld}/{pid}.jpg"
+
+        signed_cloud_url = get_accessible_image_url(cloud_url) if cloud_url else ""
+        raw_thumb = meta.get("thumbnail_url")
+        signed_thumb_url = get_accessible_image_url(raw_thumb) if raw_thumb else signed_cloud_url
+
+        meta["url"] = signed_cloud_url
+        if cloud_url and "raw_s3_url" not in meta:
+            meta["raw_s3_url"] = cloud_url
 
         scored.append({
             "image_id": img_id,
             "score": round(score, 4),
-            "thumbnail_url": meta.get("thumbnail_url"),
-            "cloud_url": cloud_url,
+            "thumbnail_url": signed_thumb_url,
+            "cloud_url": signed_cloud_url,
             "metadata": meta,
         })
     return sorted(scored, key=lambda x: x["score"], reverse=True)

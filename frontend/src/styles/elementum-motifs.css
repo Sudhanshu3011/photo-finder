@@ -1,0 +1,234 @@
+/**
+ * Elementum Design System — Signature Editorial Motifs
+ * Replicating Elementum.jpg with strict anti-slop guidelines and WCAG 2.2 AA accessibility.
+ */
+
+@import "./elementum-tokens.css";
+
+/* ==========================================================================
+   1. HIGHLIGHTER CAPSULES (.hl-pill)
+   ========================================================================== */
+.hl-pill {
+  display: inline-block;
+  padding: 2px 14px;
+  border-radius: var(--radius-pill);
+  vertical-align: middle;
+  font-weight: 700;
+  line-height: 1.25;
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.hl-pill.mint {
+  background-color: var(--pill-mint-bg);
+  color: var(--pill-mint-fg);
+}
+
+.hl-pill.rose {
+  background-color: var(--pill-rose-bg);
+  color: var(--pill-rose-fg);
+}
+
+.hl-pill.butter {
+  background-color: var(--pill-butter-bg);
+  color: var(--pill-butter-fg);
+}
+
+/* ==========================================================================
+   2. HAND-DRAWN OCHRE UNDERLINE (.hl-underline)
+   ========================================================================== */
+.hl-underline {
+  position: relative;
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.hl-underline::after {
+  content: "";
+  position: absolute;
+  left: -2px;
+  right: -2px;
+  bottom: 2px;
+  height: 4px;
+  background-color: var(--accent-ochre);
+  border-radius: 4px;
+  opacity: 0.85;
+  transform: rotate(-0.6deg);
+  z-index: -1;
+  pointer-events: none;
+}
+
+/* ==========================================================================
+   3. ACCESSIBLE ACTION BUTTONS (.btn-pill-black, .btn-secondary)
+   ========================================================================== */
+.btn-pill-black {
+  min-height: var(--min-touch-target); /* Ensures 44px touch target (WCAG 2.2) */
+  min-width: var(--min-touch-target);
+  background-color: var(--btn-primary-bg);
+  color: var(--btn-primary-fg);
+  border: none;
+  border-radius: var(--radius-pill);
+  padding: 10px 28px;
+  font-family: var(--font-body);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-decoration: none;
+  transition: transform 0.15s ease, background-color 0.2s ease;
+}
+
+.btn-pill-black:hover {
+  background-color: var(--btn-primary-hover);
+  transform: translateY(-1px);
+}
+
+.btn-pill-black:active {
+  transform: translateY(0);
+}
+
+.btn-pill-black:focus-visible {
+  outline: 2px solid var(--accent-ochre);
+  outline-offset: 3px;
+}
+
+.btn-secondary {
+  min-height: var(--min-touch-target);
+  min-width: var(--min-touch-target);
+  background-color: transparent;
+  color: var(--ink-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-pill);
+  padding: 10px 22px;
+  font-family: var(--font-body);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.btn-secondary:hover {
+  background-color: var(--surface-muted);
+  border-color: #D4D4CA;
+}
+
+.btn-secondary:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+/* ==========================================================================
+   4. CIRCULAR PORTRAIT AVATARS & CONSTELLATIONS
+   ========================================================================== */
+.avatar-circle {
+  border-radius: var(--radius-circle);
+  object-fit: cover;
+  display: inline-block;
+  background-color: var(--surface-muted);
+  border: 2px solid #FFFFFF;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.06);
+  flex-shrink: 0;
+}
+
+.constellation-wrapper {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+  padding: 24px 0 36px 0;
+}
+
+.constellation-wrapper .avatar-circle {
+  transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.constellation-wrapper .avatar-circle:hover {
+  transform: scale(1.08);
+}
+
+/* ==========================================================================
+   5. THREE-PART EDITORIAL ROWS
+   ========================================================================== */
+.editorial-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 72px; /* Touch target compliant */
+  padding: 20px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  cursor: pointer;
+  text-decoration: none;
+  transition: padding-left 0.2s ease, background-color 0.2s ease;
+}
+
+.editorial-row:hover {
+  padding-left: 20px;
+  background-color: rgba(217, 239, 230, 0.35); /* Subtle mint wash */
+}
+
+.editorial-row:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
+}
+
+.editorial-row .row-meta {
+  width: 22%;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink-secondary);
+}
+
+.editorial-row .row-title {
+  width: 68%;
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--ink-primary);
+  line-height: 1.25;
+}
+
+.editorial-row .row-arrow {
+  width: 10%;
+  text-align: right;
+  font-size: 24px;
+  color: var(--ink-primary);
+  transition: transform 0.2s ease;
+}
+
+.editorial-row:hover .row-arrow {
+  transform: translateX(6px);
+}
+
+/* ==========================================================================
+   6. MOBILE SAFE AREA & PAGE SHELL HELPERS (ui-page)
+   ========================================================================== */
+.mobile-page-shell {
+  max-width: var(--max-width-mobile);
+  margin: 0 auto;
+  padding-left: max(var(--space-6), var(--safe-left));
+  padding-right: max(var(--space-6), var(--safe-right));
+  padding-top: max(var(--space-4), var(--safe-top));
+  padding-bottom: max(var(--space-20), var(--safe-bottom));
+}
+
+@media (max-width: 768px) {
+  .editorial-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 16px 8px;
+  }
+  .editorial-row .row-meta,
+  .editorial-row .row-title,
+  .editorial-row .row-arrow {
+    width: 100%;
+    text-align: left;
+  }
+}
+

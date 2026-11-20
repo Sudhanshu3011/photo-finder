@@ -20,6 +20,7 @@ from src.api.dependencies import (
     check_folder_capability,
 )
 from src.modules.infra.postgres_repository import get_repository, PostgresRepository
+from src.modules.storage.s3_storage import get_accessible_image_url
 from src.services.jobs import get_job_status as fetch_job_status
 
 logger = logging.getLogger("src.api.processing_routes")
@@ -139,6 +140,7 @@ async def trigger_face_clustering(
 
 
 @router.get("/api/clusters", response_model=List[FaceClusterResponse], status_code=status.HTTP_200_OK)
+@router.get("/api/processing/clusters", response_model=List[FaceClusterResponse], status_code=status.HTTP_200_OK, include_in_schema=False)
 def get_all_clusters(
     folder_name: Optional[str] = Query(None, description="Filter clusters by folder/album name"),
     service: ImageProcessingService = Depends(get_image_processing_service),
@@ -148,10 +150,20 @@ def get_all_clusters(
     """List all identified face clusters (people albums), optionally filtered by folder."""
     user_id = current_user.get("user_id")
     clusters = service.get_clusters(folder=folder_name, user_id=user_id, tenant_id=tenant_id)
-    return [FaceClusterResponse(**c) for c in clusters]
+    results = []
+    for c in clusters:
+        item = dict(c)
+        medoid = item.get("medoid_image_url") or (item["sample_crop_urls"][0] if item.get("sample_crop_urls") else None)
+        if medoid:
+            item["medoid_image_url"] = get_accessible_image_url(medoid)
+        if item.get("sample_crop_urls"):
+            item["sample_crop_urls"] = [get_accessible_image_url(u) for u in item["sample_crop_urls"] if u]
+        results.append(FaceClusterResponse(**item))
+    return results
 
 
 @router.patch("/api/clusters/{cluster_id}", response_model=FaceClusterResponse, status_code=status.HTTP_200_OK)
+@router.patch("/api/processing/clusters/{cluster_id}", response_model=FaceClusterResponse, status_code=status.HTTP_200_OK, include_in_schema=False)
 def rename_face_cluster(
     cluster_id: str,
     req: ClusterRenameRequest,
@@ -180,10 +192,18 @@ def rename_face_cluster(
     if not matching:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Cluster {cluster_id} not found")
 
-    return FaceClusterResponse(**matching[0])
+    res_item = dict(matching[0])
+    if res_item.get("sample_crop_urls"):
+        res_item["sample_crop_urls"] = [get_accessible_image_url(u) for u in res_item["sample_crop_urls"] if u]
+    if res_item.get("medoid_image_url"):
+        res_item["medoid_image_url"] = get_accessible_image_url(res_item["medoid_image_url"])
+
+    return FaceClusterResponse(**res_item)
 
 
 @router.get("/api/jobs/{job_id}", response_model=JobProgressResponse, status_code=status.HTTP_200_OK, tags=["Photo Upload & Ingestion"])
+@router.get("/api/processing/jobs/{job_id}/progress", response_model=JobProgressResponse, status_code=status.HTTP_200_OK, include_in_schema=False)
+@router.get("/api/processing/jobs/{job_id}", response_model=JobProgressResponse, status_code=status.HTTP_200_OK, include_in_schema=False)
 async def get_job_progress(
     job_id: str,
     current_user: dict = Depends(require_current_user),
